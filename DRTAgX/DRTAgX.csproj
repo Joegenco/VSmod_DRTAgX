@@ -1,0 +1,93 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+        <OutputPath>bin\$(Configuration)\Mods\mod</OutputPath>
+        <Nullable>enable</Nullable>
+        <Version>2.0.2</Version>
+    </PropertyGroup>
+
+    <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
+        <Optimize>false</Optimize>
+        <DebugSymbols>true</DebugSymbols>
+        <DebugType>embedded</DebugType>
+        <DefineConstants>DEBUG;TRACE</DefineConstants>
+    </PropertyGroup>
+
+    <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+        <Optimize>true</Optimize>
+        <DebugType>none</DebugType>
+    </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Core Vintage Story API -->
+    <Reference Include="VintagestoryAPI">
+      <HintPath>$(VINTAGE_STORY)/VintagestoryAPI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="VintagestoryLib">
+      <HintPath>$(VINTAGE_STORY)/VintagestoryLib.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <!-- GUI Cairo vector rendering -->
+    <Reference Include="cairo-sharp">
+      <HintPath>$(VINTAGE_STORY)/Lib/cairo-sharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <!-- JSON serialization for ModConfig -->
+    <Reference Include="Newtonsoft.Json">
+      <HintPath>$(VINTAGE_STORY)/Lib/Newtonsoft.Json.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <!-- Use the OpenTK assembly shipped with this Vintage Story installation. -->
+    <Reference Include="OpenTK.Graphics">
+      <HintPath>$(VINTAGE_STORY)/Lib/OpenTK.Graphics.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="OpenTK.Mathematics">
+      <HintPath>$(VINTAGE_STORY)/Lib/OpenTK.Mathematics.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>$(VINTAGE_STORY)/Lib/0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+    <!-- Metadata Files -->
+    <ItemGroup>
+        <Content Include="modinfo.json">
+            <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+        </Content>
+        <Content Include="modicon.png" Condition="Exists('modicon.png')">
+            <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+        </Content>
+    </ItemGroup>
+
+    <!-- Copy assets for ordinary builds on every platform. Windows developers
+         may opt into a source junction for shader hot reload instead. -->
+    <PropertyGroup>
+        <UseAssetJunction Condition="'$(UseAssetJunction)' == '' or '$(OS)' != 'Windows_NT'">false</UseAssetJunction>
+    </PropertyGroup>
+    <ItemGroup Condition="'$(UseAssetJunction)' != 'true'">
+        <Content Include="assets\**\*">
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+            <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+        </Content>
+    </ItemGroup>
+    <Target Name="SymlinkAssets" BeforeTargets="Build" Condition="'$(UseAssetJunction)' == 'true'">
+        <PropertyGroup>
+            <SourceAssetsDir>$(MSBuildProjectDirectory)\assets</SourceAssetsDir>
+            <OutputAssetsDir>$([System.IO.Path]::GetFullPath('$(OutputPath)\assets', '$(MSBuildProjectDirectory)'))</OutputAssetsDir>
+        </PropertyGroup>
+
+        <!-- Reuse a correct link, create a missing one, and preserve unexpected
+             entries. No marker files or recursive removal of junctions. -->
+        <Exec Command="powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Build\EnsureAssetJunction.ps1&quot; -SourceDirectory &quot;$(SourceAssetsDir)&quot; -OutputDirectory &quot;$(OutputAssetsDir)&quot;" />
+    </Target>
+
+</Project>

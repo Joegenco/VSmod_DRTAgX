@@ -1,0 +1,10 @@
+<Project>
+  <!-- Fail before compilation with a useful setup error rather than missing
+       engine types. All projects use assemblies from the local installation. -->
+  <Target Name="ValidateVintageStoryInstallation" BeforeTargets="ResolveAssemblyReferences">
+    <Error Condition="'$(VINTAGE_STORY)' == ''"
+           Text="Set VINTAGE_STORY to your Vintage Story 1.22.7 installation directory." />
+    <Error Condition="'$(VINTAGE_STORY)' != '' and !Exists('$(VINTAGE_STORY)/VintagestoryAPI.dll')"
+           Text="VINTAGE_STORY must point to the directory containing VintagestoryAPI.dll." />
+  </Target>
+</Project>

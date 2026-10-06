@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><Nullable>enable</Nullable></PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../DRTAgX/DRTAgX.csproj" />
+    <Reference Include="VintagestoryAPI"><HintPath>$(VINTAGE_STORY)/VintagestoryAPI.dll</HintPath></Reference>
+    <Reference Include="VintagestoryLib"><HintPath>$(VINTAGE_STORY)/VintagestoryLib.dll</HintPath></Reference>
+    <Reference Include="0Harmony"><HintPath>$(VINTAGE_STORY)/Lib/0Harmony.dll</HintPath></Reference>
+    <Reference Include="OpenTK.Core"><HintPath>$(VINTAGE_STORY)/Lib/OpenTK.Core.dll</HintPath></Reference>
+    <Reference Include="OpenTK.Graphics"><HintPath>$(VINTAGE_STORY)/Lib/OpenTK.Graphics.dll</HintPath></Reference>
+    <Reference Include="OpenTK.Mathematics"><HintPath>$(VINTAGE_STORY)/Lib/OpenTK.Mathematics.dll</HintPath></Reference>
+    <Reference Include="OpenTK.Windowing.Common"><HintPath>$(VINTAGE_STORY)/Lib/OpenTK.Windowing.Common.dll</HintPath></Reference>
+    <Reference Include="OpenTK.Windowing.Desktop"><HintPath>$(VINTAGE_STORY)/Lib/OpenTK.Windowing.Desktop.dll</HintPath></Reference>
+    <Reference Include="OpenTK.Windowing.GraphicsLibraryFramework"><HintPath>$(VINTAGE_STORY)/Lib/OpenTK.Windowing.GraphicsLibraryFramework.dll</HintPath></Reference>
+    <None Include="$(VINTAGE_STORY)/Lib/glfw3.dll" CopyToOutputDirectory="Always" Condition="'$(OS)' == 'Windows_NT'" />
+  </ItemGroup>
+</Project>

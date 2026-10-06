@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework></PropertyGroup>
+  <ItemGroup>
+    <Reference Include="OpenTK.Core"><HintPath>$(VINTAGE_STORY)/Lib/OpenTK.Core.dll</HintPath></Reference>
+    <Reference Include="OpenTK.Graphics"><HintPath>$(VINTAGE_STORY)/Lib/OpenTK.Graphics.dll</HintPath></Reference>
+    <Reference Include="OpenTK.Mathematics"><HintPath>$(VINTAGE_STORY)/Lib/OpenTK.Mathematics.dll</HintPath></Reference>
+    <Reference Include="OpenTK.Windowing.Common"><HintPath>$(VINTAGE_STORY)/Lib/OpenTK.Windowing.Common.dll</HintPath></Reference>
+    <Reference Include="OpenTK.Windowing.Desktop"><HintPath>$(VINTAGE_STORY)/Lib/OpenTK.Windowing.Desktop.dll</HintPath></Reference>
+    <Reference Include="OpenTK.Windowing.GraphicsLibraryFramework"><HintPath>$(VINTAGE_STORY)/Lib/OpenTK.Windowing.GraphicsLibraryFramework.dll</HintPath></Reference>
+  </ItemGroup>
+  <ItemGroup Condition="'$(OS)' == 'Windows_NT'"><None Include="$(VINTAGE_STORY)/Lib/glfw3.dll" CopyToOutputDirectory="Always" /></ItemGroup>
+</Project>
