@@ -15,10 +15,13 @@ internal static class LodFogAssetPatch
     internal static void Apply(ICoreClientAPI api)
     {
         Installed = false;
+        DistantVistasAssetPatch.Apply(api);
         // Both released Farseer and the installed ChunkLOD use this asset domain.
         IAsset? asset = api.Assets.TryGet(new AssetLocation("farseer", "shaders/region.fsh"));
         if (asset == null) return;
         string source = asset.ToText();
+        // The DV Farseer overlay has its own palette/coverage contract.
+        if (DistantVistasAssetPatch.TryPatch(source, true, out _)) { Installed = true; return; }
         if (!TryPatchFragment(source, out string patched))
         {
             if (!_warned) api.Logger.Warning("[DRT AgX] Unrecognized LOD region shader; native LOD lighting/fog/range retained.");

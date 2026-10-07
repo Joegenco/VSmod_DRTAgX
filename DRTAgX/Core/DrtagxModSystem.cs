@@ -6,7 +6,7 @@ using Vintagestory.Client.NoObf;
 [assembly: ModInfo(
     name: "DRT AgX",
     modID: "drtagx",
-    Version = "2.0.2",
+    Version = "2.0.3",
     Description = "Client-side AgX display transform for Vintage Story.",
     Authors = new[] { "Joegen" },
     Side = "Client"

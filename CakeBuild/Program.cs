@@ -128,7 +128,8 @@ public sealed class PackageTask : FrostingTask<BuildContext>
 {
     public override void Run(BuildContext context)
     {
-        string stem = context.Name + "_" + context.Version;
+        // Use the public mod name consistently in installable release filenames.
+        string stem = BuildContext.ProjectName + "_" + context.Version;
         string runId = Guid.NewGuid().ToString("N");
         string staging = Path.Combine(context.ReleasesDirectory, ".staging", stem + "_" + runId);
         Directory.CreateDirectory(staging);

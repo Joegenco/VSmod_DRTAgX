@@ -1,6 +1,9 @@
 #version 330 core
 #extension GL_ARB_explicit_attrib_location: enable
 
+// Clouds fade four times farther out than terrain; physical weather fog stays native.
+#define DRT_BOUNDARY_DISTANCE_SCALE 4.0
+
 in vec4 rgbaCloud;
 in vec4 rgbaFog;
 in vec3 plightrgb;
@@ -64,7 +67,7 @@ void main()
 	if (col.a < 0.005) discard;
 	
     // Use physical geometry, never the smoothed OIT pseudo-depth. Shared boundary
-    // extinction fades cloud coverage into the same horizon as distant terrain.
+    // extinction fades cloud coverage at four times the terrain horizon distance.
     col = drtCloudThroughFog(col, drtSurfaceMediumTransport(drtCloudWorldPos, gl_FragCoord.z, true));
     if (drtFogColor.w > 0.5) col = applySpheresFog(col, 0.0, drtCloudWorldPos - drtAtmosphereCamera.xyz);
 

@@ -4,7 +4,7 @@
     "name": "DRT AgX",
     "authors": [ "Joegen" ],
     "description": "Client-side AgX display transform for Vintage Story.",
-    "version": "2.0.2",
+    "version": "2.0.3",
     "side": "client",
     "dependencies": {"sheydermod": "1.1.3"}
 }

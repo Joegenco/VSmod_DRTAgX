@@ -49,9 +49,12 @@ internal sealed class AtmosphereProgramBindings : IDisposable
         _harmony.Patch(stop, prefix: new HarmonyMethod(typeof(AtmosphereProgramBindings), nameof(BeforeStop)));
         // Probe actual mesh draw state once; inspecting shader Use alone would
         // miss blend changes made between shader activation and mesh submission.
-        foreach (var method in typeof(ClientPlatformWindows).GetMethods())
-            if (method.Name == "RenderMesh") _harmony.Patch(method,
-                prefix: new HarmonyMethod(typeof(AtmosphereProgramBindings), nameof(BeforeMesh)));
+        // A startup diagnostic must not add a Harmony dispatch to every mesh
+        // submission in ordinary gameplay. Developer sessions retain the probe.
+        if (ClientSettings.DeveloperMode)
+            foreach (var method in typeof(ClientPlatformWindows).GetMethods())
+                if (method.Name == "RenderMesh") _harmony.Patch(method,
+                    prefix: new HarmonyMethod(typeof(AtmosphereProgramBindings), nameof(BeforeMesh)));
     }
 
     private Binding? Get(int program)

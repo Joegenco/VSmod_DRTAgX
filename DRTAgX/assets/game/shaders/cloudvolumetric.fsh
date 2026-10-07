@@ -1,6 +1,9 @@
 #version 330 core
 #extension GL_ARB_explicit_attrib_location: enable
 
+// Extend cloud concealment to four times terrain range before shared fog includes.
+#define DRT_BOUNDARY_DISTANCE_SCALE 4.0
+
 uniform mat4 iMvpMatrix;
 uniform sampler2D depthTex;
 uniform sampler2D cloudMap;
@@ -141,7 +144,7 @@ vec4 traverse(vec3 o, vec3 d, float far, float T, vec3 rayOrigin){
                 if (drtAtmosphereView.z > 0.7) {
                     fog = drtWaterTransport(length(worldPos - drtAtmosphereCamera.xyz), drtFogColor.rgb, true);
                 } else {
-                    // Apply terrain's horizontal horizon fade per occupied slab;
+                    // Apply the fourfold horizontal horizon fade per occupied slab;
                     // cloud premultiplication and OIT revealage follow its opacity.
                     fog = drtSurfaceAirTransport(worldPos, true);
                 }

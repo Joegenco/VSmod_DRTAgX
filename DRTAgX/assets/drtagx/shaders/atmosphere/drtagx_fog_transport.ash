@@ -117,18 +117,24 @@ float drtSurfaceFogExposure(vec3 worldPos, float sunlight) {
     return max(local, camera * outdoorPath);
 }
 
+// Cloud fragment programs extend horizon concealment without changing physical
+// weather/WorldFog distances or the terrain programs' default boundary.
+#ifndef DRT_BOUNDARY_DISTANCE_SCALE
+#define DRT_BOUNDARY_DISTANCE_SCALE 1.0
+#endif
+
 float drtBoundaryEnd() {
     float distance = drtAtmosphereView.x;
-    return drtFogEnvironment.z > distance ? drtFogEnvironment.z : 1.05 * distance;
+    return DRT_BOUNDARY_DISTANCE_SCALE * (drtFogEnvironment.z > distance ? drtFogEnvironment.z : 1.05 * distance);
 }
 
 float drtBoundaryTransmittance(float horizontalDistance) {
-    float distance = drtAtmosphereView.x;
+    float distance = drtAtmosphereView.x * DRT_BOUNDARY_DISTANCE_SCALE;
     if (distance <= 0.0) return 1.0;
     // Keep the current 66% start. A supported enabled LOD provider extends only
     // the end; physical weather and the fixed sky path keep their own distances.
     float t;
-    if (drtFogEnvironment.z > distance)
+    if (drtFogEnvironment.z > drtAtmosphereView.x)
         t = 1.0 - smoothstep(0.66 * distance, drtBoundaryEnd(), horizontalDistance);
     else t = 1.0 - smoothstep(0.66 * distance, 1.05 * distance, horizontalDistance);
     float squared = t * t;

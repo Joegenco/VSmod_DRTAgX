@@ -194,7 +194,7 @@ internal static class LodFogProbe
         }
         try {
             foreach (bool chunkLod in new[] { true, false }) {
-                string prefix = chunkLod ? "" : "farseer-";
+                string prefix = chunkLod ? "" : File.Exists(Path.Combine(references, "legacy-farseer-region.fsh")) ? "legacy-farseer-" : "farseer-";
                 string original = File.ReadAllText(Path.Combine(references, prefix + "region.fsh"));
                 Check(LodFogAssetPatch.TryPatchFragment(original, out string patched), "recognized released LOD fragment");
                 if (chunkLod) {
@@ -350,6 +350,14 @@ internal static class LodFogProbe
                     GL.DeleteProgram(program);
                     Console.WriteLine($"PASS {(chunkLod ? "ChunkLOD 1.2.0-dev.6" : "Farseer 1.4.0")} actual shader compile/link, native uniform keys/fallback, SSAO={ssao}, day/night/clear/dense sky merge, opaque alpha/forward glow, native water-exit depth, real binder restoration");
                 }
+            }
+            if (File.Exists(Path.Combine(references, "lodterrain.fsh")))
+            {
+                // Use the same real binder/resources as the established LOD probes.
+                bindings.Reload();
+                DistantVistasProbe.Run(references, Expand, frame, ubo, fbo,
+                    p => { bindings.Reload(); bind.Invoke(bindings, new object[] { p }); },
+                    () => bindings.Restore(), Read, SharedSky);
             }
             Check(GL.GetError() == ErrorCode.NoError, "LOD probe GL error");
         } finally {

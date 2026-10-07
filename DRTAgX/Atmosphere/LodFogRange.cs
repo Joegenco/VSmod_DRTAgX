@@ -8,7 +8,7 @@ namespace DRTAgX;
 internal sealed class LodFogRange
 {
     private readonly ICoreClientAPI _api;
-    private readonly Func<float>? _chunkLod, _farseer;
+    private readonly Func<float>? _chunkLod, _farseer, _distantVistas;
 
     internal LodFogRange(ICoreClientAPI api)
     {
@@ -18,15 +18,26 @@ internal sealed class LodFogRange
         // rather than retaining a config instance that a provider could replace.
         _chunkLod = Resolve("ChunkLod.ChunkLodModSystem", "MaxViewDistance");
         _farseer = Resolve("Farseer.FarseerModSystem", "FarViewDistance");
+        try
+        {
+            object? system = api.ModLoader.GetModSystem("DistantVistas.DistantVistasModSystem");
+            if (system != null) _distantVistas = CreateDistantGetter(system);
+        }
+        catch (Exception ex)
+        {
+            api.Logger.Warning("[DRT AgX] Distant Vistas range unavailable: " + ex.Message);
+        }
     }
 
     internal float Endpoint
     {
         get
         {
-            if (!LodFogAssetPatch.Installed) return 0f;
+            if (!LodFogAssetPatch.Installed && !DistantVistasAssetPatch.Installed) return 0f;
             int cap = _farseer != null ? _api.World.Config.GetInt("maxFarViewDistance", 0) : 0;
-            return SelectEndpoint(_chunkLod?.Invoke() ?? 0f, _farseer?.Invoke() ?? 0f, cap);
+            float legacy = LodFogAssetPatch.Installed ? SelectEndpoint(_chunkLod?.Invoke() ?? 0f, _farseer?.Invoke() ?? 0f, cap) : 0f;
+            float distant = DistantVistasAssetPatch.Installed ? _distantVistas?.Invoke() ?? 0f : 0f;
+            return Math.Max(legacy, float.IsFinite(distant) ? Math.Max(0f, distant) : 0f);
         }
     }
 
@@ -58,6 +69,16 @@ internal sealed class LodFogRange
         var available = Expression.AndAlso(Expression.NotEqual(client, Expression.Constant(null, client.Type)),
             Expression.AndAlso(Expression.NotEqual(config, Expression.Constant(null, config.Type)), enabled));
         return Expression.Lambda<Func<float>>(Expression.Condition(available, distance, Expression.Constant(0f))).Compile();
+    }
+
+    internal static Func<float> CreateDistantGetter(object system)
+    {
+        // Installed 1.1.3: an idle/deferred provider has no renderer. Its live
+        // EffectiveFarDistance already accounts for captured coverage and the cap.
+        var renderer = Expression.PropertyOrField(Expression.Constant(system), "renderer");
+        var distance = Expression.Convert(Expression.PropertyOrField(renderer, "EffectiveFarDistance"), typeof(float));
+        return Expression.Lambda<Func<float>>(Expression.Condition(
+            Expression.NotEqual(renderer, Expression.Constant(null, renderer.Type)), distance, Expression.Constant(0f))).Compile();
     }
 
     internal static float SelectEndpoint(float chunkLod, float farseer, int farseerServerCap)

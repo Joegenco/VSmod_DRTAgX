@@ -4,7 +4,7 @@ DRT AgX is a client-side graphics mod for Vintage Story. It adds an AgX display
 transform, HDR bloom and exposure, atmospheric lighting and fog, and shadows for
 placed and moving lights through the game's existing rendering pipeline.
 
-Current version: **2.0.2**. Author: **Joegen**.
+Current version: **2.0.3**. Author: **Joegen**.
 
 ## Requirements
 
@@ -47,7 +47,7 @@ sh ./build.sh
 ```
 
 The packaging command restores Cake build dependencies from NuGet and writes
-`Releases/drtagx_2.0.2.zip` and its checksum. It packages only the mod DLL,
+`Releases/DRTAgX_2.0.3.zip` and its checksum. It packages only the mod DLL,
 metadata, and runtime assets. Existing archives are preserved.
 
 ## Install and configure

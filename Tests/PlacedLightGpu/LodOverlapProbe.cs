@@ -95,7 +95,7 @@ internal static class LodOverlapProbe
                         }
                     } else {
                         Require(Math.Abs(pixel[0]-.02f)>1e-5 || Math.Abs(pixel[1]-.03f)>1e-5 || Math.Abs(pixel[2]-.04f)>1e-5,
-                            "baseline/distant proxy did not replace native object color");
+                            $"baseline/distant proxy did not replace native object color: range={nativeRange}, pos={position}, ready={ready}, patched={program==patched}, rgba={string.Join(',', pixel)}");
                     }
                     if (program == original && expectedWrite && excluded) ++reproduced;
                 }
