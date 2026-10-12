@@ -60,9 +60,15 @@ flat out int renderFlags;
 
 
 #include vertexflagbits.ash
+#define DRT_RECEIVER_VERTEX
+#include drtagx_receiver_geometry.ash
 #include shadowcoords.vsh
 #define DRT_DYNAMIC_NORMAL_VIEW (modelViewMatrix * vec4(normal, 0.0)).xyz
 #define DRT_DEFERRED_TERRAIN 1
+// Match the fragment's raw-albedo mode; prelit fallback keeps the vertex floor.
+#if !defined(DRT_MEMO_LEGACY_DIAGNOSTIC) && !defined(DRT_PERFORMANCE_NO_PLS)
+#define DRT_FRAGMENT_NIGHTVISION_FLOOR
+#endif
 #include fogandlight.vsh
 #include vertexwarp.vsh
 #include colormap.vsh
@@ -98,16 +104,28 @@ void main(void)
 	vertexPosition = xyz;
  #endif
 
+    uint receiverToken=(uint(renderFlags)>>13u)&4095u;
+#if USESSBO > 0
+    // A FaceData base is shared by both triangles, independent of provoking order.
+    bool receiverStatic=all(equal(vdata.flags & ivec4(WindModeBitMask),ivec4(0))) &&
+        all(equal((uvec4(vdata.flags)>>13u)&uvec4(4095u),uvec4(receiverToken)));
+    drtAuthorReceiverPlane(vertexPosition,vdata.xyz,receiverToken,receiverStatic);
+    drtAuthorReceiverBounds(vdata.xyz,2.0*vdata.xyzA,2.0*vdata.xyzB,receiverToken);
+#else
+    drtAuthorReceiverPlane(vertexPosition,vertexPosition,receiverToken,(renderFlags & WindModeBitMask)==0);
+#endif
 	vec4 truePos = vec4(vertexPosition + origin, 1.0);
 	worldPos = truePos;
 	//worldPos = applyVertexWarping(renderFlags, worldPos);
 	worldPos = applyGlobalWarping(worldPos);
+    drtReceiverWarp = length(worldPos.xyz - truePos.xyz);
 
 	vec4 cameraPos = modelViewMatrix * worldPos;
 	// Decode the geometric normal before shared point-light evaluation.
 	normal = sm_unpackNormalOrZero(renderFlags);
 
 	gl_Position = projectionMatrix * cameraPos;
+    drtReceiverUnbiasedClip = gl_Position;
 
 	// SheyderMod: skipped in the deferred performance-mode variant (done per pixel in the relight)
 #if !(SHEYDER_DEFERRED > 0 && SSAOLEVEL > 0 && NORMALVIEW == 0)

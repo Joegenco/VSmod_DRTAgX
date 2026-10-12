@@ -8,6 +8,28 @@ internal sealed partial class StaticLightSources
     private const int EmptyIdentityChecksPerFrame = 16;
     private readonly List<ChunkKey> _emptyChunks = new(1331);
     private int _emptyCursor;
+    private int _missingRetryCursor;
+    internal int MissingRetriesThisFrame { get; private set; }
+
+    private int RetryActiveMissing(int remaining)
+    {
+        MissingRetriesThisFrame = 0;
+        // Two lookups/metadata snapshots maximum, included in the existing
+        // sixteen-scan budget. Cursor survives camera turns and retries never
+        // enqueue a catch-up burst. Notifications remain the fast path.
+        int checks = Math.Min(128, _scanOrder.Count);
+        for (int i = 0; i < checks && MissingRetriesThisFrame < Math.Min(2, remaining); i++)
+        {
+            if (!ContinueScanWork) break;
+            if (_missingRetryCursor >= _scanOrder.Count) _missingRetryCursor = 0;
+            ChunkKey key = _scanOrder[_missingRetryCursor++];
+            if (!_missingChunks.Contains(key) || _scannedThisFrame.Contains(key)) continue;
+            Scan(key);
+            MissingRetriesThisFrame++;
+        }
+
+        return MissingRetriesThisFrame;
+    }
 
     // Render-thread bookkeeping only. The frozen client API has no unload
     // event; empty chunks can still own casters affecting a resident light.
@@ -18,6 +40,7 @@ internal sealed partial class StaticLightSources
             UntrackEmptyChunk(cached);
             return;
         }
+
         if (cached.EmptyIndex >= 0) return;
         cached.EmptyIndex = _emptyChunks.Count;
         _emptyChunks.Add(key);
@@ -44,9 +67,14 @@ internal sealed partial class StaticLightSources
         {
             if (_emptyCursor >= _emptyChunks.Count) _emptyCursor = 0;
             ChunkKey key = _emptyChunks[_emptyCursor];
-            if (_byChunk[key].Chunk is { Disposed: false }) { _emptyCursor++; continue; }
-            // No chunk lookup, LightPositions read, or emitter query. Missing
-            // chunks wait for notifications and are never polled here.
+            if (_byChunk[key].Chunk is { Disposed: false })
+            {
+                _emptyCursor++;
+                continue;
+            }
+
+            // No chunk lookup here. The separate bounded readiness cursor
+            // retries active missing chunks even without a load notification.
             RemoveCached(key);
             _missingChunks.Add(key);
             Changed(key);

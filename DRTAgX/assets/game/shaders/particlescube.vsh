@@ -37,7 +37,7 @@ out vec4 gnormal;
 #include shadowcoords.vsh
 // Match forward placed-light falloff; particle lighting has no depth-map reads.
 #define DRT_FORWARD_PLACED_LIGHTS 1
-#define DRT_DYNAMIC_NORMAL_VIEW (modelViewMatrix * vec4(normalv.xyz, 0.0)).xyz
+#define DRT_DYNAMIC_NORMAL_VIEW (modelViewMatrix * vec4(normal, 0.0)).xyz
 #include fogandlight.vsh
 #include vertexwarp.vsh
 
@@ -70,8 +70,10 @@ void main()
 	mat4 rotMat = rotation3d(vec3(0,1,0), atan2(particleDir.z, particleDir.x) + particleDir.w);
 	worldPos = rotMat * (vec4(vertexPosition,1.0) * vec4(scale,1.0)) + vec4(particlePosition, 1.0);
 	worldPos.w=1;		
+	normal = mat3(rotMat) * normalv.xyz; // Cube face directions follow the instance rotation.
 #else
 	worldPos = vec4(vertexPosition * scale + particlePosition, 1.0);
+	normal = normalv.xyz;
 #endif
 
 	worldPos = applyVertexWarping(renderFlags, worldPos);
@@ -81,17 +83,25 @@ void main()
 	gl_Position = projectionMatrix * cameraPos;
 	
 	int flags = min(255, 2 * (renderFlags & 0xff)); // increase the glow on cube particles
-	color = applyLight(rgbaAmbientIn, rgbaLightIn, flags, cameraPos) * rgbaBlockIn;
+	vec4 particleLight = applyLight(rgbaAmbientIn, rgbaLightIn, flags, cameraPos);
+#ifdef DRT_EXPLICIT_SURFACE_LIGHTING
+	// Block debris already carries the native atlas/tint material convention.
+	// Match terrain's mapped material directly; a cube-only transfer curve
+	// darkens these samples relative to the block they came from.
+	color = vec4(max(rgbaBlockIn.rgb, vec3(0.0)), rgbaBlockIn.a);
+#else
+	color = particleLight * rgbaBlockIn;
+#endif
 	
 	fogAmount = getFogLevel(vec4(particlePosition, 0), fogMinIn, fogDensityIn);
 	rgbaFog = rgbaFogIn;
-	normal = normalv.xyz;
 	
 	calcShadowMapCoords(modelViewMatrix, worldPos);
 	
 #if SSAOLEVEL > 0
 	
 	fragPosition = cameraPos;
-	gnormal = modelViewMatrix * vec4(normal.xyz, 0.25);
+	// A normal is a direction (w=0); camera translation must not change AO.
+	gnormal = vec4((modelViewMatrix * vec4(normal, 0.0)).xyz, 0.25);
 #endif
 }

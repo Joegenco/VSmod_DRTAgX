@@ -253,9 +253,9 @@ void main(){
 
     if(k.a <= 0.0) discard;
 
-    k = exp(log(k + 1.0)) - 1.0;
-
-    if(k.a <= 0.0) discard;
+    // k is nonnegative premultiplied radiance/coverage. The former
+    // exp(log(k+1))-1 is an identity and only adds transcendental work and
+    // cancellation error, so pass the accumulated value directly to OIT.
 
     for(int i = 0; i < OIT_BINS; i++)
         OITaccumulate(i, k * (1.0 - OITreveal[i]));

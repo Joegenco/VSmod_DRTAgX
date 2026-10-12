@@ -4,11 +4,11 @@ using System.Collections.Generic;
 namespace DRTAgX;
 
 // Pure edit/caster coverage shared by residents, admissions and replacements.
-// Exact edits use the requested 16-block radius; completed chunk uploads retain
-// the full 22-block caster reach, including geometry beyond that edit radius.
+// Exact edits and completed chunk uploads cover the full point-depth reach.
+// Upload timing may be unavailable, so a real blocker edit cannot depend on it.
 internal static class PlacedLightGeometry
 {
-    internal const double EditRadius = 16, EditFallbackSeconds = 1.5;
+    internal const double EditRadius = StaticTerrainShadowMaps.Range, EditFallbackSeconds = 1.5;
 
     internal static bool EditsTouch(StaticLightSources.Source source,
         IReadOnlyList<StaticLightSources.Position> edits, bool ignoreEmitter = false)
@@ -19,6 +19,7 @@ internal static class PlacedLightGeometry
             var edit = edits[i];
             if (Touches(source, edit.X, edit.Y, edit.Z, 1, EditRadius)) return true;
         }
+
         return false;
     }
 
@@ -26,7 +27,8 @@ internal static class PlacedLightGeometry
         IReadOnlyList<StaticLightSources.ChunkKey> chunks)
     {
         for (int i = 0; i < chunks.Count; i++)
-            if (IntersectsChunk(source, chunks[i])) return true;
+            if (IntersectsChunk(source, chunks[i]))
+                return true;
         return false;
     }
 
@@ -41,7 +43,9 @@ internal static class PlacedLightGeometry
         double dy = Math.Max(y - (source.Y + StaticTerrainShadowMaps.SourceHeight),
             source.Y + StaticTerrainShadowMaps.SourceHeight - (y + size));
         double dz = Math.Max(z - (source.Z + 0.5), source.Z + 0.5 - (z + size));
-        dx = Math.Max(dx, 0); dy = Math.Max(dy, 0); dz = Math.Max(dz, 0);
+        dx = Math.Max(dx, 0);
+        dy = Math.Max(dy, 0);
+        dz = Math.Max(dz, 0);
         return dx * dx + dy * dy + dz * dz <= radius * radius;
     }
 }

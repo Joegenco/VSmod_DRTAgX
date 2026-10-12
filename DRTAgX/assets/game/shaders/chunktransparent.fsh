@@ -1,6 +1,12 @@
-#version 330 core
+#version 430 core
+#extension GL_ARB_gpu_shader5 : require
 #extension GL_ARB_shader_storage_buffer_object : require
 #extension GL_ARB_shading_language_420pack : require
+
+// Shipping PLS is memo-only; diagnostics may compile the legacy source loops.
+#ifndef DRT_MEMO_LEGACY_DIAGNOSTIC
+#define DRT_MEMO_ONLY
+#endif
 #extension GL_ARB_explicit_attrib_location: enable
 
 uniform sampler2D terrainTex;

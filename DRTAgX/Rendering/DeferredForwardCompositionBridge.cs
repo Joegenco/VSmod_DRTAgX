@@ -26,7 +26,8 @@ internal sealed class DeferredForwardCompositionBridge : IRenderer
         try
         {
             var system = api.ModLoader.GetModSystem("SheyderMod.SheyderModSystem");
-            var renderers = system == null ? null
+            var renderers = system == null
+                ? null
                 : AccessTools.Field(system.GetType(), "_renderers")?.GetValue(system) as IEnumerable;
             if (renderers != null)
                 foreach (object renderer in renderers)
@@ -36,12 +37,15 @@ internal sealed class DeferredForwardCompositionBridge : IRenderer
                     // disabled/unready deferred mode also remains a no-op.
                     if (renderer.GetType().FullName != "SheyderMod.Features.Deferred.DeferredRenderer") continue;
                     var method = AccessTools.Method(renderer.GetType(), "OnRelight", Type.EmptyTypes);
-                    if (method != null) {
+                    if (method != null)
+                    {
                         _relight = method.CreateDelegate<Action>(renderer);
-                        _decals = new DeferredTerrainDecalBridge(api,renderer);
+                        _decals = new DeferredTerrainDecalBridge(api, renderer);
                     }
+
                     break;
                 }
+
             if (_relight == null)
                 throw new MissingMethodException("Sheyder DeferredRenderer.OnRelight");
 
@@ -62,12 +66,17 @@ internal sealed class DeferredForwardCompositionBridge : IRenderer
         // The existing relight method restores the primary FBO and GL draw state.
         // Alt+8 measures placed-owned work. This native pass also contains sun,
         // moving lights and other effects, so keep its separate Alt+9 scope.
-        int movingTiming = MovingLightGpuProfile.Relight.Begin(MovingLightGpuProfile.Enabled);
-        MovingLightGpuProfile.Total.BeginRelight();
-        try { _relight?.Invoke(); _decals?.Flush(); }
-        finally {
-            MovingLightGpuProfile.Relight.End(movingTiming);
-            MovingLightGpuProfile.Total.EndRelight();
+        try
+        {
+            _decals?.BeforeRelight();
+            _relight?.Invoke();
+            _decals?.Flush();
+        }
+        finally
+        {
+            // Idempotent after Flush; also release the auxiliary MRT/samplers
+            // when the native relight delegate or decal replay fails.
+            _decals?.AfterRelight();
         }
     }
 

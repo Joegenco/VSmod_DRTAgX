@@ -7,11 +7,11 @@ layout(std430, binding = 6) buffer TileBounds { Bounds tiles[]; };
 layout(std430, binding = 7) buffer HeldOutput { mat4 heldMatrices[2]; vec4 heldStatus[2]; };
 uniform sampler2D terrainDepth;
 uniform mat4 inverseProjection;
-uniform vec4 handLight[2]; // xyz eye position, authored reach capped to 48
+uniform vec4 handLight[2]; // xyz eye position, active moving reach clamped to 16..32 blocks
 uniform ivec2 dimensions;
 uniform int tileWidth;
 uniform int tileCount;
-uniform int heldSize;
+uniform ivec2 heldSize;
 shared vec4 slopeScratch[64];
 shared vec4 infoScratch[64];
 
@@ -32,6 +32,13 @@ void main() {
     uint lane=gl_LocalInvocationIndex;
  #ifdef DRT_FINAL_FIT
     int hand=int(gl_WorkGroupID.x);
+    // Each workgroup belongs to one hand, so this branch is uniform before
+    // any barrier. Inactive hands need no tile reads or shared reduction; clear
+    // their output so removing a held light cannot retain a previous fit.
+    if(handLight[hand].w<=0.0) {
+        if(lane==0u) { heldStatus[hand]=vec4(0); heldMatrices[hand]=mat4(0); }
+        return;
+    }
     vec4 slopes=vec4(1e30,1e30,-1e30,-1e30),info=vec4(1e30,0,0,0);
     for(int t=int(lane);t<tileCount;t+=64) {
         Bounds b=tiles[t*2+hand];
@@ -47,9 +54,11 @@ void main() {
     }
     // Ten-percent width margin, plus receiver offset and two filter texels.
     vec2 width=max(slopes.zw-slopes.xy,vec2(1e-4));
-    vec2 pad=width*(0.1+4.0/float(heldSize)) + vec2(0.025/max(info.x,0.005));
+    // Match each axis to its actual rectangular map dimension, preserving
+    // the same filter footprint and snapped texel grid at any view aspect.
+    vec2 pad=width*(0.1+4.0/vec2(heldSize)) + vec2(0.025/max(info.x,0.005));
     vec2 lo=slopes.xy-pad,hi=slopes.zw+pad;
-    vec2 stepSize=(hi-lo)/float(max(heldSize-4,1));
+    vec2 stepSize=(hi-lo)/vec2(max(heldSize-ivec2(4),ivec2(1)));
     lo=floor(lo/stepSize)*stepSize;hi=ceil(hi/stepSize)*stepSize;
     const float nearPlane=0.005;
     float farPlane=handLight[hand].w+0.5;
@@ -91,6 +100,13 @@ void main() {
         }
     }
     for(int h=0;h<2;++h) {
+        // handLight is uniform for every invocation. Skip the second shared
+        // reduction in the common one-hand case, while publishing empty bounds
+        // for that hand. Active hands still inspect every depth pixel above.
+        if(handLight[h].w<=0.0) {
+            if(lane==0u) { tiles[t*2+h].slopes=slopes[h]; tiles[t*2+h].info=infos[h]; }
+            continue;
+        }
         slopeScratch[lane]=slopes[h];infoScratch[lane]=infos[h];mergeBounds(lane);
         if(lane==0u){tiles[t*2+h].slopes=slopeScratch[0];tiles[t*2+h].info=infoScratch[0];}
         barrier();

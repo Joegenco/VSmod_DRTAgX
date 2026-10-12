@@ -6,6 +6,7 @@ uniform int meterFirstLevel;
 uniform int emissiveFirstLevel;
 uniform int reduction = 2;
 uniform int alignedHalf = 0;
+uniform int wideFilter = 0;
 in vec2 texCoord;
 layout(location = 0) out vec4 sceneColor;
 layout(location = 1) out vec2 meterData;
@@ -13,11 +14,32 @@ void main() {
     // Four bilinear taps cover the source footprint without a brightness threshold.
     // Four bilinear taps at +/-one source texel cover a true 4x4 quarter-resolution footprint.
     // An aligned 2:1 box is exactly one bilinear sample; odd dimensions keep the prior four taps.
-    vec2 d = texelSize * (reduction == 4 ? 1.0 : 0.5);
-    vec3 rgb = reduction == 2 && alignedHalf != 0 ? texture(source, texCoord).rgb : (texture(source, texCoord + vec2(-d.x, -d.y)).rgb
-              + texture(source, texCoord + vec2( d.x, -d.y)).rgb
-              + texture(source, texCoord + vec2(-d.x,  d.y)).rgb
-              + texture(source, texCoord + vec2( d.x,  d.y)).rgb) * 0.25;
+    vec3 rgb;
+    if (wideFilter != 0) {
+        // Normalized 13-tap low-pass: center/outer corners/outer axes/inner
+        // corners sum to one. Broader support smooths the coarse-scale glow
+        // before decimation while retaining HDR radiance and RGB proportions.
+        vec2 t = texelSize;
+        rgb = texture(source, texCoord).rgb * 0.125;
+        rgb += (texture(source, texCoord + vec2(-2.0, -2.0) * t).rgb
+              + texture(source, texCoord + vec2( 2.0, -2.0) * t).rgb
+              + texture(source, texCoord + vec2(-2.0,  2.0) * t).rgb
+              + texture(source, texCoord + vec2( 2.0,  2.0) * t).rgb) * 0.03125;
+        rgb += (texture(source, texCoord + vec2(-2.0, 0.0) * t).rgb
+              + texture(source, texCoord + vec2( 2.0, 0.0) * t).rgb
+              + texture(source, texCoord + vec2(0.0, -2.0) * t).rgb
+              + texture(source, texCoord + vec2(0.0,  2.0) * t).rgb) * 0.0625;
+        rgb += (texture(source, texCoord + vec2(-1.0, -1.0) * t).rgb
+              + texture(source, texCoord + vec2( 1.0, -1.0) * t).rgb
+              + texture(source, texCoord + vec2(-1.0,  1.0) * t).rgb
+              + texture(source, texCoord + vec2( 1.0,  1.0) * t).rgb) * 0.125;
+    } else {
+        vec2 d = texelSize * (reduction == 4 ? 1.0 : 0.5);
+        rgb = reduction == 2 && alignedHalf != 0 ? texture(source, texCoord).rgb : (texture(source, texCoord + vec2(-d.x, -d.y)).rgb
+                  + texture(source, texCoord + vec2( d.x, -d.y)).rgb
+                  + texture(source, texCoord + vec2(-d.x,  d.y)).rgb
+                  + texture(source, texCoord + vec2( d.x,  d.y)).rgb) * 0.25;
+    }
     if (emissiveFirstLevel != 0) {
         // Primary color 1 carries the same glow metadata used by final.fsh.
         // Apply its gain only once, before the bloom pyramid blurs this RGB.

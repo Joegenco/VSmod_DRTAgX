@@ -1,13 +1,25 @@
-#version 330 core
+#version 430 core
+#extension GL_ARB_gpu_shader5 : require
 #extension GL_ARB_shader_storage_buffer_object : require
 #extension GL_ARB_shading_language_420pack : require
 #extension GL_ARB_explicit_attrib_location: enable
+
+// Shipping receivers use the bounded memo path. Only an explicit diagnostic
+// recompile retains the original per-source loops for baseline measurements.
+#ifndef DRT_MEMO_LEGACY_DIAGNOSTIC
+#define DRT_MEMO_ONLY
+#endif
+#if defined(DRT_MEMO_ONLY) && !defined(DRT_PERFORMANCE_NO_PLS)
+// Raw material lets cached PLS introduce a color channel even when the native
+// vertex light is zero. Legacy/no-PLS diagnostics retain their prelit contract.
+#define DRT_ALBEDO_SURFACE_LIGHTING
+#endif
 
 // ============================================================================
 // DRTAgX / SheyderMod: Chunk Opaque Fragment Shader (G-Buffer & Forward Pass)
 // ----------------------------------------------------------------------------
 // G-Buffer Output Layout:
-//   outColor     (location 0) : Albedo times voxel blocklight + emission for marked pixels (RGBA).
+//   outColor     (location 0) : Private voxel + own-emission illumination when the paired resource owner enables it; otherwise prelit albedo (RGBA).
 //   outGlow      (location 1) : [r: glowLevel, g: -(2.0 + specD + contactClass), b: encodedB, a: fogAmount + alpha].
 //                               - encodedB: continuousSunAccess * 63.0 + (isSolidCaster ? 64.0 : 0.0)
 //                               - contactClass: 8.0 = static no-cull, 6.0 = grass receiver, 4.0 = wind foliage, 2.0 = solid terrain, 0.0 = alpha-test
@@ -65,8 +77,32 @@ layout(location = 3) out vec4 outGPosition;
 #endif
 
 #include vertexflagbits.ash
+#include drtagx_receiver_geometry.ash
+layout(location = 4) out int outReceiverPlane;
+layout(location = 5) out uvec2 outReceiverBounds;
+int drtFragmentReceiverPlane = DRT_RECEIVER_INVALID_PLANE;
+uint drtFragmentReceiverToken = 0u;
+#ifdef DRT_MEMO_ONLY
+#define DRT_DEFERRED_RECEIVER_ONLY
+#endif
 #define DRT_SURFACE_FOG_AFTER_LIGHTING
 #define DRT_TERRAIN_PLACED_OCCLUSION
+// Keep G-buffer geometry free of SSBO writes so discarded/hidden fragments do
+// not force lighting work. Late forward replay can read completed relight cells.
+bool drtMemoForwardReceiver = false;
+#define DRT_MEMO_READ_ONLY
+#define DRT_MEMO_FORWARD_RECEIVER drtMemoForwardReceiver
+#define DRT_MEMO_AUTHORED_NORMAL normal
+#if defined(DRT_MEMO_ONLY) && !defined(DRT_PERFORMANCE_NO_PLS) && SSAOLEVEL > 0
+// Declare before the shared receiver helper: only the same eligible ordinary
+// class that owns G-normal W may reuse its exact native cache keys in replay.
+uint drtMemoSurfaceNormal = 0u;
+#define DRT_MEMO_NATIVE_TOKEN ((haxyFade <= 0 && drtWindPresence <= 0.0 && (renderFlags & WindModeBitMask) == 0) ? drtMemoSurfaceNormal : 4096u)
+#endif
+#if defined(DRT_ALBEDO_SURFACE_LIGHTING)
+#define DRT_SHARED_DECAL_IRRADIANCE
+#include drtagx_decal_irradiance.ash
+#endif
 #include fogandlight.fsh
 #include dither.fsh
 #include skycolor.fsh
@@ -124,10 +160,21 @@ void sm_deferredFill(vec4 texColor, vec3 rawAlbedo)
     // Keep genuine no-cull fades separate so they can retain authored alpha.
     // The fullscreen relight has depth, but no undeformed wind position.
     // Prepare PLS here so self-occlusion stays attached to the swaying card.
+#ifndef DRT_MEMO_ONLY
     bool placedPrepared = drtWindPresence > 0.0 && drtTerrainPlacedCount > 0;
     if (placedPrepared) drtPrepareTerrainPlacedVisibility(drtPlacedRestPos, true, glowLevel);
     outColor = vec4(rawAlbedo * (drtVoxelLight * drtTerrainPlacedVisibility +
         drtTerrainPlacedRadiance + drtEmissionLight), drtSolidCaster ? 1.0 : texColor.a);
+#else
+    // Wind keeps native voxel lighting; solid placed lighting is filled by
+    // fullscreen relight, so G-buffer geometry needs no prepared PLS payload.
+    outColor = vec4((drtDeferredIlluminationPayload != 0 ? vec3(1.0) : rawAlbedo) *
+        (drtVoxelLight + drtEmissionLight), drtSolidCaster ? 1.0 : texColor.a);
+    if (haxyFade <= 0 && drtWindPresence <= 0.0 && windMode == 0) {
+        outReceiverPlane = drtFragmentReceiverPlane;
+        outReceiverBounds = drtPackedReceiverBounds(drtFragmentReceiverPlane);
+    }
+#endif
 #if SSAOLEVEL > 0
     // gposition.xyz carries the RAW albedo (SubSurface backlight base), NOT camPos: the relight
     // rebuilds view position from the depth buffer for marked pixels, so these three channels
@@ -135,8 +182,16 @@ void sm_deferredFill(vec4 texColor, vec3 rawAlbedo)
     outGPosition = vec4(rawAlbedo, fogAmount * 2 + glowLevel);
     // Negative W tags prepared PLS without adding an attachment or reducing
     // sunlight precision. Relight restores the native nonnegative fog payload.
+#ifndef DRT_MEMO_ONLY
     if (placedPrepared) outGPosition.w = -1.0 - outGPosition.w;
+#endif
     outGNormal = vec4(gnormal.xyz, gnw);
+#if defined(DRT_MEMO_ONLY) && !defined(DRT_PERFORMANCE_NO_PLS)
+    // Carry the stable native world normal without a view-space half-float
+    // round trip. Preserve every wind/no-cull W contract and AO foliage sign.
+    if (haxyFade <= 0 && drtWindPresence <= 0.0 && windMode == 0)
+        outGNormal.w = drtPackPlacedSurfaceNormal(drtMemoSurfaceNormal);
+#endif
     if (haxyFade > 0) {
         // The bent plane supplies sunlight receiving. Wind PLS uses its rest pose.
         // W preserves the authored vertex sunlight shade used in forward mode.
@@ -150,7 +205,14 @@ void sm_deferredFill(vec4 texColor, vec3 rawAlbedo)
 
 void main()
 {
-    drtCaptureTerrainPlacedPlane(drtPlacedRestPos);
+    outReceiverPlane = DRT_RECEIVER_INVALID_PLANE;
+    outReceiverBounds = uvec2(0xffffffffu);
+    drtFragmentReceiverPlane = drtValidatedReceiverPlane(drtFragmentReceiverToken);
+#if defined(DRT_MEMO_ONLY) && !defined(DRT_PERFORMANCE_NO_PLS) && SSAOLEVEL > 0
+    drtMemoSurfaceNormal = drtFragmentReceiverToken;
+#elif !defined(DRT_MEMO_ONLY)
+    drtCaptureTerrainPlacedPlane(worldPos.xyz);
+#endif
     int windMode = renderFlags & WindModeBitMask;
     bool drtGrassReceiver = haxyFade > 0 && windMode != 0 && windMode != WindModeLeavesMask;
     // Capture primitive derivatives before any terrain/alpha discard or per-pixel
@@ -197,6 +259,7 @@ void main()
     }
     // <<< SheyderMod
 
+    drtMemoForwardReceiver = true; // This fragment passed the G-buffer return.
     drtPrepareTerrainPlacedVisibility(drtPlacedRestPos, drtWindPresence > 0.0, glowLevel);
     float murkiness = getUnderwaterMurkiness();
 
@@ -213,7 +276,12 @@ void main()
     // This plane is geometric, independently of the grid toggle or material shade.
     drtForwardSunPlaneNormal = drtTerrainSunPlaneNormal;
     float b = getBrightnessFromShadowMap();
+#ifdef DRT_ALBEDO_SURFACE_LIGHTING
+    outColor = applyFogAndShadowFromBrightness(vec4(mappedTex.rgb, texColor.a), fogAmount,
+        drtCombineSunDarkening(b, nb), worldPos.xyz);
+#else
     outColor = applyFogAndShadowFromBrightness(texColor, fogAmount, drtCombineSunDarkening(b, nb), worldPos.xyz);
+#endif
 
     float glow = 0;
     float godrayLevel = 0;

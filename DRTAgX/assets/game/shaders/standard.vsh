@@ -41,6 +41,8 @@ out vec4 camPos;
 out vec4 worldPos;
 flat out int renderFlags;
 out float voxSunLight;
+// Retain the unlit tint separately; zero native light is not zero albedo.
+out vec3 drtReceiverMaterialTint;
 
 out vec3 normal;
 #if SSAOLEVEL > 0
@@ -50,12 +52,18 @@ out vec4 gnormal;
 
 #include vertexflagbits.ash
 #include shadowcoords.vsh
+// The shipping fragment stage receives cached terrain shadows directly; avoid
+// also adding the old nearest-source unshadowed vertex contribution.
+#ifdef DRT_MEMO_LEGACY_DIAGNOSTIC
 #define DRT_FORWARD_PLACED_LIGHTS 1
+#endif
 // Native unshaded GUI/preview draws share this program with world items.
 uniform int normalShaded;
 uniform int skyShaded;
 #define DRT_FORWARD_PLACED_GUARD (normalShaded > 0 || skyShaded > 0)
 #define DRT_DYNAMIC_NORMAL_VIEW (viewMatrix * vec4(normal, 0.0)).xyz
+// The raw-material fragment receiver enforces its minimum after PLS replacement.
+#define DRT_FRAGMENT_NIGHTVISION_FLOOR
 #include fogandlight.vsh
 #include vertexwarp.vsh
 
@@ -99,6 +107,7 @@ void main(void)
 	// Decode before lighting so each face responds to the point-light direction.
 	normal = unpackNormal(flags);
 	normal = normalize((modelMatrix * vec4(normal, 0.0)).xyz);
+	drtReceiverMaterialTint = rgbaTint.rgb * colorIn.rgb;
 	color = rgbaTint * applyLight(rgbaAmbientIn, rgbaLightIn, renderFlags, camPos) * colorIn;
 	// Carry tint in the explicit components too, so GLOWSUB emission remains
 	// independent of sunlight when the fragment stage shades the mixed color.
@@ -109,6 +118,7 @@ void main(void)
 #if defined(GLOWSUB)
 	color.rgb *= 1 - 0.5 * gs;
 	float glowMix = clamp(max(0.0, glowLevel - gs) / 2.0, 0.0, 1.0);
+	drtReceiverMaterialTint *= (1.0 - 0.5 * gs) * (1.0 - glowMix);
 	color.rgb = mix(color.rgb, rgbaGlow.rgb, glowMix);
 #ifdef DRT_EXPLICIT_SURFACE_LIGHTING
 	drtSunLight *= (1.0 - 0.5 * gs) * (1.0 - glowMix);

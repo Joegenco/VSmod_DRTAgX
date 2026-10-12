@@ -1,5 +1,11 @@
 #version 330 core
 #extension GL_ARB_explicit_attrib_location: enable
+#extension GL_ARB_shader_storage_buffer_object: require
+#extension GL_ARB_shading_language_420pack: require
+
+// FpHands compiles this source against cached native includes before mod startup.
+// Preserve native GLSL overload resolution; explicitly enable only the SSBO and
+// binding qualifiers required by the read-only placed-light receiver below.
 
 // SheyderMod: vendored engine standard.fsh (generic block / item / entity pass) with a mod hook:
 // the Specular highlight (inlined here, not #included, because FpHands recompiles this shader
@@ -34,6 +40,9 @@ uniform vec2 baseTextureSize;
 uniform vec2 baseUvOrigin;
 uniform int normalShaded;
 uniform int skyShaded;
+// The vertex stage already receives this same native uniform. Perspective
+// world draws have clip-w from eye depth; orthographic GUI/preview draws do not.
+uniform mat4 projectionMatrix;
 uniform float damageEffect = 0;
 #if defined(ALLOWDEPTHOFFSET)
 #if ALLOWDEPTHOFFSET > 0
@@ -52,6 +61,7 @@ in vec4 camPos;
 in vec4 worldPos;
 in vec3 normal;
 in float voxSunLight; 
+in vec3 drtReceiverMaterialTint;
 flat in int renderFlags;
 
 
@@ -144,6 +154,10 @@ void drtComposeSunSprite(vec4 texColor) {
 #endif
 
 void main() {
+#ifdef DRT_EXPLICIT_SURFACE_LIGHTING
+    // Derivative plane is local to this rasterized model, not an inferred cache key.
+    vec3 drtReceiverNormal=drtSunPrimitiveNormal(worldPos.xyz-drtAtmosphereCamera.xyz,normal);
+#endif
 #ifdef DRT_FOG_TRANSPORT
     if (drtSunSprite != 0 && drtAtmosphereFlags.x > 0.5) {
         vec4 texColor = texture(tex, uv) * color;
@@ -160,6 +174,7 @@ void main() {
        b = min(1, f * 1.5 + 0.65 + (1-damageEffect));
     }
 
+    vec4 drtReceiverMaterial;
     if (overlayOpacity > 0) {
        vec2 uvOverlay = (uv - baseUvOrigin) * (baseTextureSize / overlayTextureSize);
 
@@ -169,15 +184,17 @@ void main() {
        float a1 = overlayOpacity * col1.a  * min(1, col2.a * 100);
        float a2 = col2.a * (1 - a1);
 
-       outColor = vec4(
+        drtReceiverMaterial = vec4(
          (a1 * col1.r + col2.r * a2) / (a1+a2),
          (a1 * col1.b + col2.g * a2) / (a1+a2),
          (a1 * col1.g + col2.b * a2) / (a1+a2),
          a1 + a2
-       ) * color;
+        );
+        outColor = drtReceiverMaterial * color;
 
     } else {
-       outColor = texture(tex, uv) * color;
+        drtReceiverMaterial = texture(tex, uv);
+        outColor = drtReceiverMaterial * color;
     }
 
     // Shade only the explicit sunlight before adding thermal/authored emission.
@@ -193,10 +210,33 @@ void main() {
     ox_apply(sunBoost, worldPos.xyz);
     sunVisibility *= 1.0 + max(0.0, shadowIntensity * 2.0 - 1.66) / 1.5;
     outColor.rgb = drtShadeSurface(outColor.rgb, sunVisibility, sunBoost);
+#if !defined(DRT_MEMO_LEGACY_DIAGNOSTIC) && defined(DRT_PLACED_RECEIVER_FALLBACK)
+    // Unshaded world models can receive PLS too. Projection, rather than their
+    // material shading flags, excludes orthographic GUI/preview draws.
+    float drtReceiverSky=pow(clamp(sm_voxSunLight,0.0,1.0),1.6)*
+        clamp(dot(drtSkyLight,DRT_LUMINANCE),0.0,1.0);
+    float drtReceiverWeight=(1.0-smoothstep(112.0,128.0,length(camPos.xyz)))*
+        (1.0-smoothstep(0.2,0.9,drtReceiverSky))*(1.0-clamp(glowLevel*4.0,0.0,1.0));
+    vec4 drtReceiverPlaced,drtReceiverSelf;
+    // Transparent atlas gaps do not need any placed-shadow queries.
+    if(outColor.a>=alphaTest && abs(projectionMatrix[3][3])<0.5 && drtReceiverWeight>0.0 &&
+       drtReadReceiverPlacedLight(worldPos.xyz-drtAtmosphereCamera.xyz,drtReceiverNormal,
+           drtReceiverPlaced,drtReceiverSelf))
+        outColor.rgb+=drtReceiverMaterial.rgb*drtReceiverMaterialTint*
+            drtReceiverPlacedVoxelDelta(drtVoxelLight,drtReceiverPlaced,drtReceiverSelf,drtReceiverWeight);
+#endif
 #else
     // Before mod startup, apply the native include's brightness to its prelit
     // color. The later shared-include compile retains sun-only composition above.
     outColor.rgb *= sunVisibility;
+#endif
+
+#ifdef DRT_EXPLICIT_SURFACE_LIGHTING
+    // The direct PLS handoff can reduce voxel light after the vertex floor.
+    // Keep the requested minimum in material space, preserving tint and alpha.
+    vec3 drtReceiverEmission = drtReceiverMaterial.rgb * drtReceiverMaterialTint * drtEmissionLight;
+    outColor.rgb = drtReceiverEmission + max(outColor.rgb - drtReceiverEmission,
+        drtReceiverMaterial.rgb * drtReceiverMaterialTint * drtMinimumSurfaceLight());
 #endif
 
     // SheyderMod: raw albedo for the specular tint

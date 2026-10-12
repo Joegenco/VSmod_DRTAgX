@@ -20,7 +20,6 @@ internal sealed class AtmosphereProgramBindings : IDisposable
     private readonly bool _previousDither;
     private int _boundProgram, _previousGenericUbo;
     private IndexedBufferState _previousUbo;
-    private bool _skyBlendLogged;
     internal int Volume { get; set; }
 
     private sealed class Binding
@@ -33,7 +32,9 @@ internal sealed class AtmosphereProgramBindings : IDisposable
 
     internal AtmosphereProgramBindings(ICoreClientAPI api, AtmosphereSkyResources sky, int buffer)
     {
-        _api = api; _sky = sky; _buffer = buffer;
+        _api = api;
+        _sky = sky;
+        _buffer = buffer;
         // Render-thread lifetime policy: disable fixed-function quantization noise
         // for every native shader, including programs without the atmosphere UBO.
         // Restore the incoming capability only when this owner is disposed.
@@ -47,21 +48,18 @@ internal sealed class AtmosphereProgramBindings : IDisposable
         if (use == null || stop == null) throw new MissingMethodException("ShaderProgramBase.Use/Stop");
         _harmony.Patch(use, postfix: new HarmonyMethod(typeof(AtmosphereProgramBindings), nameof(AfterUse)));
         _harmony.Patch(stop, prefix: new HarmonyMethod(typeof(AtmosphereProgramBindings), nameof(BeforeStop)));
-        // Probe actual mesh draw state once; inspecting shader Use alone would
-        // miss blend changes made between shader activation and mesh submission.
-        // A startup diagnostic must not add a Harmony dispatch to every mesh
-        // submission in ordinary gameplay. Developer sessions retain the probe.
-        if (ClientSettings.DeveloperMode)
-            foreach (var method in typeof(ClientPlatformWindows).GetMethods())
-                if (method.Name == "RenderMesh") _harmony.Patch(method,
-                    prefix: new HarmonyMethod(typeof(AtmosphereProgramBindings), nameof(BeforeMesh)));
     }
 
     private Binding? Get(int program)
     {
         if (_programs.TryGetValue(program, out Binding? cached)) return cached;
         int block = GL.GetUniformBlockIndex(program, "DrtAtmosphere");
-        if (block < 0) { _programs.Add(program, null); return null; }
+        if (block < 0)
+        {
+            _programs.Add(program, null);
+            return null;
+        }
+
         GL.UniformBlockBinding(program, block, BufferBinding);
         var binding = new Binding();
         string[] names = ["drtSkyViewPrevious", "drtSkyViewCurrent", "drtFogVolume", "liquidDepth"];
@@ -77,7 +75,8 @@ internal sealed class AtmosphereProgramBindings : IDisposable
         for (int i = 0; i < count; ++i)
         {
             string name = GL.GetActiveUniform(program, i, out int size, out ActiveUniformType type);
-            if (name.StartsWith("drtSkyView", StringComparison.Ordinal) || name == "drtFogVolume" || name == "liquidDepth") continue;
+            if (name.StartsWith("drtSkyView", StringComparison.Ordinal) || name == "drtFogVolume" ||
+                name == "liquidDepth") continue;
             if (!type.ToString().Contains("Sampler", StringComparison.Ordinal)) continue;
             // Sampler arrays may use nonconsecutive units; inspect each actual
             // assignment rather than assuming element j uses firstUnit+j.
@@ -90,40 +89,38 @@ internal sealed class AtmosphereProgramBindings : IDisposable
                 if (unit >= 0 && unit < occupied.Length) occupied[unit] = true;
             }
         }
+
         for (int i = 0; i < names.Length; ++i)
         {
             binding.Locations[i] = GL.GetUniformLocation(program, names[i]);
-            if (binding.Locations[i] < 0) { binding.Units[i] = -1; continue; }
+            if (binding.Locations[i] < 0)
+            {
+                binding.Units[i] = -1;
+                continue;
+            }
+
             int unit = 13;
             while (unit >= 10 && (unit >= occupied.Length || occupied[unit])) --unit;
             if (unit < 10)
             {
                 unit = 16;
                 while (unit < occupied.Length && occupied[unit]) ++unit;
-                if (unit >= occupied.Length) throw new InvalidOperationException($"No free atmosphere texture units in program {program}");
+                if (unit >= occupied.Length)
+                    throw new InvalidOperationException($"No free atmosphere texture units in program {program}");
             }
+
             binding.Units[i] = unit;
             occupied[unit] = true;
             GL.Uniform1(binding.Locations[i], unit);
             ++binding.Count;
         }
+
         _programs.Add(program, binding);
         return binding;
     }
 
     private static void AfterUse(ShaderProgramBase __instance) => _instance?.Bind(__instance.ProgramId);
     private static void BeforeStop() => _instance?.Restore();
-    private static void BeforeMesh()
-    {
-        var instance = _instance;
-        if (instance == null || instance._skyBlendLogged) return;
-        var sky = instance._api.Render.GetEngineShader(EnumShaderProgram.Sky);
-        if (sky == null || sky.ProgramId != instance._boundProgram) return;
-        instance._skyBlendLogged = true;
-        instance._api.Logger.Notification($"[DRT AgX] Native sky draw blend: enabled={GL.IsEnabled(EnableCap.Blend)}, " +
-            $"RGB={GL.GetInteger(GetPName.BlendSrcRgb)}/{GL.GetInteger(GetPName.BlendDstRgb)}, " +
-            $"alpha={GL.GetInteger(GetPName.BlendSrcAlpha)}/{GL.GetInteger(GetPName.BlendDstAlpha)}.");
-    }
 
     private void Bind(int program)
     {
@@ -137,6 +134,7 @@ internal sealed class AtmosphereProgramBindings : IDisposable
             GL.Uniform1(binding.Quality, FrameQuality.Current.Performance ? 1 : 0);
             binding.QualityGeneration = FrameQuality.Generation;
         }
+
         _previousGenericUbo = GL.GetInteger(GetPName.UniformBufferBinding);
         // Other mods can bind a subrange at this index; preserve its full extent.
         _previousUbo = IndexedBufferState.Capture(BufferRangeTarget.UniformBuffer, BufferBinding);
@@ -145,7 +143,8 @@ internal sealed class AtmosphereProgramBindings : IDisposable
         int active = GL.GetInteger(GetPName.ActiveTexture);
         var buffers = _api.Render.FrameBuffers;
         int liquid = buffers != null && buffers.Count > 5 && buffers[5] != null && !buffers[5].Disposed
-            ? buffers[5].DepthTextureId : 0;
+            ? buffers[5].DepthTextureId
+            : 0;
         for (int i = 0; i < 4; ++i)
         {
             int unit = binding.Units[i];
@@ -160,6 +159,7 @@ internal sealed class AtmosphereProgramBindings : IDisposable
             GL.BindTexture(i == 2 ? TextureTarget.Texture3D : TextureTarget.Texture2D,
                 i == 0 ? _sky.Previous : i == 1 ? _sky.Current : i == 2 ? Volume : liquid);
         }
+
         GL.ActiveTexture((TextureUnit)active);
     }
 
@@ -176,13 +176,36 @@ internal sealed class AtmosphereProgramBindings : IDisposable
             GL.BindTexture(i == 2 ? TextureTarget.Texture3D : TextureTarget.Texture2D, binding.Textures[i]);
             GL.BindSampler(unit, binding.Samplers[i]);
         }
+
         GL.ActiveTexture((TextureUnit)active);
         _previousUbo.Restore();
         GL.BindBuffer(BufferTarget.UniformBuffer, _previousGenericUbo);
         _boundProgram = 0;
     }
 
-    internal void Reload() { Restore(); _programs.Clear(); _skyBlendLogged = false; }
+    // Optional raw-GL providers bypass native ShaderProgram.Use/Stop. Their
+    // verified draw boundaries borrow the same bindings and restore them in a
+    // finalizer; no global GL interception or additional render pass is needed.
+    internal static void BindExternal(int program) => _instance?.Bind(program);
+
+    internal static void RestoreExternal() => _instance?.Restore();
+
+    internal static void ForgetExternal(int program)
+    {
+        var owner = _instance;
+        if (owner == null) return;
+        // Only retire this provider's cache entry. A deleted GL id may be reused
+        // by another program with a different uniform/sampler layout.
+        if (owner._boundProgram == program) owner.Restore();
+        owner._programs.Remove(program);
+    }
+
+    internal void Reload()
+    {
+        Restore();
+        _programs.Clear();
+    }
+
     public void Dispose()
     {
         Restore();

@@ -21,7 +21,8 @@ internal sealed class StaticLightTileCompute : IDisposable
         if (_program != 0) GL.DeleteProgram(_program);
         if (_depthProgram != 0) GL.DeleteProgram(_depthProgram);
         _program = 0;
-        _depthProgram = 0; _depthFailed = false;
+        _depthProgram = 0;
+        _depthFailed = false;
         _failed = false;
     }
 
@@ -36,19 +37,25 @@ internal sealed class StaticLightTileCompute : IDisposable
             GL.ShaderSource(shader, Encoding.UTF8.GetString(asset.Data));
             GL.CompileShader(shader);
             GL.GetShader(shader, ShaderParameter.CompileStatus, out int compiled);
-            if (compiled == 0) throw new InvalidOperationException("staticlighttiles.csh (GLSL 430): " + GL.GetShaderInfoLog(shader));
+            if (compiled == 0)
+                throw new InvalidOperationException("staticlighttiles.csh (GLSL 430): " + GL.GetShaderInfoLog(shader));
             program = GL.CreateProgram();
             GL.AttachShader(program, shader);
             GL.LinkProgram(program);
             GL.GetProgram(program, GetProgramParameterName.LinkStatus, out int linked);
-            if (linked == 0) throw new InvalidOperationException("staticlighttiles.csh link: " + GL.GetProgramInfoLog(program));
+            if (linked == 0)
+                throw new InvalidOperationException("staticlighttiles.csh link: " + GL.GetProgramInfoLog(program));
             _countLocation = GL.GetUniformLocation(program, "sourceCount");
             _widthLocation = GL.GetUniformLocation(program, "tileWidth");
             _tilesLocation = GL.GetUniformLocation(program, "tileCount");
             _program = program;
             program = 0;
         }
-        catch { _failed = true; throw; }
+        catch
+        {
+            _failed = true;
+            throw;
+        }
         finally
         {
             GL.DeleteShader(shader);
@@ -59,7 +66,8 @@ internal sealed class StaticLightTileCompute : IDisposable
     internal void Dispatch(ICoreClientAPI api, int[] rectangles, int count, int width, int tiles)
     {
         Ensure(api);
-        DispatchProgram(rectangles, count, width, tiles, _program, _countLocation, _widthLocation, _tilesLocation, 0, null);
+        DispatchProgram(rectangles, count, width, tiles, _program, _countLocation, _widthLocation, _tilesLocation, 0,
+            null);
     }
 
     internal bool DispatchDepth(ICoreClientAPI api, int[] rectangles, int count, int width, int tiles,
@@ -72,11 +80,15 @@ internal sealed class StaticLightTileCompute : IDisposable
             try
             {
                 var asset = api.Assets.Get(new AssetLocation("drtagx", "shaders/staticlighttiles.csh"));
-                string source = Encoding.UTF8.GetString(asset.Data).Replace("#version 430 core", "#version 430 core\n#define DRT_DEPTH_CULL");
-                GL.ShaderSource(shader, source); GL.CompileShader(shader);
+                string source = Encoding.UTF8.GetString(asset.Data)
+                    .Replace("#version 430 core", "#version 430 core\n#define DRT_DEPTH_CULL");
+                GL.ShaderSource(shader, source);
+                GL.CompileShader(shader);
                 GL.GetShader(shader, ShaderParameter.CompileStatus, out int compiled);
                 if (compiled == 0) throw new InvalidOperationException(GL.GetShaderInfoLog(shader));
-                program = GL.CreateProgram(); GL.AttachShader(program, shader); GL.LinkProgram(program);
+                program = GL.CreateProgram();
+                GL.AttachShader(program, shader);
+                GL.LinkProgram(program);
                 GL.GetProgram(program, GetProgramParameterName.LinkStatus, out int linked);
                 if (linked == 0) throw new InvalidOperationException(GL.GetProgramInfoLog(program));
                 _depthCount = GL.GetUniformLocation(program, "sourceCount");
@@ -84,17 +96,25 @@ internal sealed class StaticLightTileCompute : IDisposable
                 _depthTiles = GL.GetUniformLocation(program, "tileCount");
                 _depthSampler = GL.GetUniformLocation(program, "terrainDepth");
                 _depthInverse = GL.GetUniformLocation(program, "inverseProjection");
-                _depthProgram = program; program = 0;
+                _depthProgram = program;
+                program = 0;
             }
             catch (Exception ex)
             {
                 _depthFailed = true;
-                api.Logger.Warning("[DRT AgX] Depth-aware placed-light culling unavailable; retaining coarse masks: {0}", ex.Message);
+                api.Logger.Warning(
+                    "[DRT AgX] Depth-aware placed-light culling unavailable; retaining coarse masks: {0}", ex.Message);
                 return false;
             }
-            finally { GL.DeleteShader(shader); if (program != 0) GL.DeleteProgram(program); }
+            finally
+            {
+                GL.DeleteShader(shader);
+                if (program != 0) GL.DeleteProgram(program);
+            }
         }
-        DispatchProgram(rectangles, count, width, tiles, _depthProgram, _depthCount, _depthWidth, _depthTiles, depthTexture, inverseProjection);
+
+        DispatchProgram(rectangles, count, width, tiles, _depthProgram, _depthCount, _depthWidth, _depthTiles,
+            depthTexture, inverseProjection);
         return true;
     }
 
@@ -105,18 +125,20 @@ internal sealed class StaticLightTileCompute : IDisposable
         int generic = GL.GetInteger(GetPName.ShaderStorageBufferBinding);
         var previousRectangles = IndexedBufferState.Capture(BufferRangeTarget.ShaderStorageBuffer, 6);
         int active = 0, oldDepth = 0, oldSampler = 0;
-        int timing = PlacedLightGpuProfile.Tiles.Begin(PlacedLightGpuProfile.Enabled);
         if (depthTexture != 0)
         {
             active = GL.GetInteger(GetPName.ActiveTexture);
             GL.ActiveTexture(TextureUnit.Texture13);
-            oldDepth = GL.GetInteger(GetPName.TextureBinding2D); oldSampler = GL.GetInteger(GetPName.SamplerBinding);
+            oldDepth = GL.GetInteger(GetPName.TextureBinding2D);
+            oldSampler = GL.GetInteger(GetPName.SamplerBinding);
         }
+
         try
         {
             if (_rectangles == 0) _rectangles = GL.GenBuffer();
             GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _rectangles);
-            GL.BufferData(BufferTarget.ShaderStorageBuffer, count * 4 * sizeof(int), rectangles, BufferUsageHint.StreamDraw);
+            GL.BufferData(BufferTarget.ShaderStorageBuffer, count * 4 * sizeof(int), rectangles,
+                BufferUsageHint.StreamDraw);
             GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 6, _rectangles);
             GL.UseProgram(program);
             GL.Uniform1(countLocation, count);
@@ -126,10 +148,12 @@ internal sealed class StaticLightTileCompute : IDisposable
             {
                 // Depth is already drawn this frame at Opaque .37. Compute
                 // writes only SSBO masks, never an attached framebuffer texture.
-                GL.BindSampler(13, 0); GL.BindTexture(TextureTarget.Texture2D, depthTexture);
+                GL.BindSampler(13, 0);
+                GL.BindTexture(TextureTarget.Texture2D, depthTexture);
                 GL.Uniform1(_depthSampler, 13);
                 GL.UniformMatrix4(_depthInverse, 1, false, inverseProjection!);
             }
+
             // The previous deferred draw may still be reading this persistent
             // tile buffer. Order those accesses before overwriting its masks.
             GL.MemoryBarrier(MemoryBarrierFlags.ShaderStorageBarrierBit);
@@ -142,12 +166,13 @@ internal sealed class StaticLightTileCompute : IDisposable
         }
         finally
         {
-            PlacedLightGpuProfile.Tiles.End(timing);
             if (depthTexture != 0)
             {
-                GL.BindTexture(TextureTarget.Texture2D, oldDepth); GL.BindSampler(13, oldSampler);
+                GL.BindTexture(TextureTarget.Texture2D, oldDepth);
+                GL.BindSampler(13, oldSampler);
                 GL.ActiveTexture((TextureUnit)active);
             }
+
             previousRectangles.Restore();
             GL.BindBuffer(BufferTarget.ShaderStorageBuffer, generic);
             GL.UseProgram(previousProgram);

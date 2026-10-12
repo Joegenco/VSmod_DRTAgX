@@ -33,11 +33,16 @@ internal sealed class LodFogRange
     {
         get
         {
-            if (!LodFogAssetPatch.Installed && !DistantVistasAssetPatch.Installed) return 0f;
+            // GhostChunks' raw-GL bridge publishes only an active, adapted
+            // provider range; keep far proxies inside the shared fog boundary.
+            var ghost = GhostChunksCompatibility.Endpoint;
+            if (!LodFogAssetPatch.Installed && !DistantVistasAssetPatch.Installed) return ghost;
             int cap = _farseer != null ? _api.World.Config.GetInt("maxFarViewDistance", 0) : 0;
-            float legacy = LodFogAssetPatch.Installed ? SelectEndpoint(_chunkLod?.Invoke() ?? 0f, _farseer?.Invoke() ?? 0f, cap) : 0f;
+            float legacy = LodFogAssetPatch.Installed
+                ? SelectEndpoint(_chunkLod?.Invoke() ?? 0f, _farseer?.Invoke() ?? 0f, cap)
+                : 0f;
             float distant = DistantVistasAssetPatch.Installed ? _distantVistas?.Invoke() ?? 0f : 0f;
-            return Math.Max(legacy, float.IsFinite(distant) ? Math.Max(0f, distant) : 0f);
+            return Math.Max(ghost, Math.Max(legacy, float.IsFinite(distant) ? Math.Max(0f, distant) : 0f));
         }
     }
 
@@ -68,7 +73,8 @@ internal sealed class LodFogRange
         var distance = Expression.Convert(configured, typeof(float));
         var available = Expression.AndAlso(Expression.NotEqual(client, Expression.Constant(null, client.Type)),
             Expression.AndAlso(Expression.NotEqual(config, Expression.Constant(null, config.Type)), enabled));
-        return Expression.Lambda<Func<float>>(Expression.Condition(available, distance, Expression.Constant(0f))).Compile();
+        return Expression.Lambda<Func<float>>(Expression.Condition(available, distance, Expression.Constant(0f)))
+            .Compile();
     }
 
     internal static Func<float> CreateDistantGetter(object system)
@@ -78,7 +84,9 @@ internal sealed class LodFogRange
         var renderer = Expression.PropertyOrField(Expression.Constant(system), "renderer");
         var distance = Expression.Convert(Expression.PropertyOrField(renderer, "EffectiveFarDistance"), typeof(float));
         return Expression.Lambda<Func<float>>(Expression.Condition(
-            Expression.NotEqual(renderer, Expression.Constant(null, renderer.Type)), distance, Expression.Constant(0f))).Compile();
+                Expression.NotEqual(renderer, Expression.Constant(null, renderer.Type)), distance,
+                Expression.Constant(0f)))
+            .Compile();
     }
 
     internal static float SelectEndpoint(float chunkLod, float farseer, int farseerServerCap)

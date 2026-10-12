@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using Vintagestory.API.Client;
 using Vintagestory.API.MathTools;
 
@@ -24,9 +25,15 @@ internal sealed partial class StaticTerrainShadowMaps
         _stageKind = kind;
         _blendStart = -1;
         _incomingLastHit = double.NegativeInfinity;
-        _bake = new PlacedLightBake { Active = true, Background = background, Slot = index,
+        _bake = new PlacedLightBake
+        {
+            // Fixed one-face work units never grow with queue age/backlog.
+            // Native draw duration is a soft-budget one-unit overshoot.
+            FaceBudget = 1,
+            Active = true, Background = background, Slot = index,
             Source = source, Generation = owner.Generation, Revision = owner.Revision,
-            Immediate = kind == StageKind.Admission && owner.Immediate };
+            Immediate = kind == StageKind.Admission && owner.Immediate
+        };
     }
 
     private void AdmitPending(int pendingIndex, bool background)
@@ -56,6 +63,7 @@ internal sealed partial class StaticTerrainShadowMaps
             // Keep every replacement candidate until successful promotion.
             // Cancellation must not depend on a continuously rotating cursor.
         }
+
         _stagedBounds = entry.Bounds;
     }
 
@@ -65,12 +73,14 @@ internal sealed partial class StaticTerrainShadowMaps
         {
             Slot slot = _slots[i];
             _victims[i] = new PlacedLightPolicy.Resident(slot.Priority, slot.LastHit,
-                !slot.Occupied || _time < slot.FailedUntil || ProtectNearbyResident(slot),
-                slot.Source.X, slot.Source.Y, slot.Source.Z);
+                !slot.Occupied || slot.Pins > 0 || _time < slot.FailedUntil || ProtectNearbyResident(slot),
+                slot.Source.X, slot.Source.Y, slot.Source.Z, slot.CameraDistance, slot.CompletedAt);
         }
+
         return entry.Immediate
             ? PlacedLightPolicy.ChoosePlacementVictim(_victims.AsSpan(0, Capacity), entry.Priority)
-            : PlacedLightPolicy.ChooseVictim(_victims.AsSpan(0, Capacity), entry.Priority);
+            : PlacedLightPolicy.ChooseVictim(_victims.AsSpan(0, Capacity), entry.Priority, entry.Distance, entry.Since,
+                _time);
     }
 
     private void ValidateStage(StaticLightSources sources, Vec3d camera, double[] view, float[] projection)
@@ -80,30 +90,75 @@ internal sealed partial class StaticTerrainShadowMaps
         // A removal elsewhere can lower the valid count after replacement
         // started. Recheck before promotion so nearby completed depth survives.
         if (_stageKind == StageKind.Replacement && ProtectNearbyResident(owner))
-        { CancelStage(); return; }
+        {
+            CancelStage();
+            return;
+        }
+
         bool incomingExists = sources.TryGet(_bake.Source, out var current);
         if (!owner.Occupied || !_bake.Matches(_stagingSlot, owner.Generation, owner.Revision, _bake.Source) ||
-            !incomingExists || !PlacedLightPendingQueue.InRange(current, PlacedLightPendingQueue.Distance(current, camera)))
-        { CancelStage(); return; }
+            !incomingExists || !sources.IsDemanded(current) ||
+            !PlacedLightPendingQueue.InRange(current, PlacedLightPendingQueue.Distance(current, camera)))
+        {
+            CancelStage();
+            return;
+        }
+
         _bake.Source = current; // HSV changes never invalidate a depth transaction.
-        _stagedBounds = _stageKind == StageKind.Replacement ? PlacedLightView.ForShadowCulling(
-            PlacedLightView.Project(current, view, projection), ViewCullingEnabled) : owner.Bounds;
+        _stagedBounds = _stageKind == StageKind.Replacement
+            ? PlacedLightView.Project(current, view, projection)
+            : owner.Bounds;
         bool visible = PlacedLightPolicy.Visible(_stagedBounds);
         if (visible) _bake.Background = false;
         if (_bake.Complete && visible && Blend > 0) _incomingLastHit = _time;
         if (_stageKind == StageKind.Replacement)
             if (PlacedLightGeometry.ChunksTouch(current, sources.ChangedChunks) ||
-                PlacedLightGeometry.EditsTouch(current, sources.BlockEdits, _bake.Immediate)) CancelStage();
+                PlacedLightGeometry.EditsTouch(current, sources.BlockEdits, _bake.Immediate))
+                CancelStage();
     }
 
-    private float Blend => _blendStart < 0 ? 0 : PlacedLightPolicy.Smooth((_time - _blendStart) /
-        (_stageKind == StageKind.Refresh ? PlacedLightPolicy.RefreshSeconds : PlacedLightPolicy.FadeSeconds));
+    private float Blend => _blendStart < 0
+        ? 0
+        : PlacedLightPolicy.Smooth((_time - _blendStart) /
+                                   (_stageKind == StageKind.Refresh
+                                       ? PlacedLightPolicy.RefreshSeconds
+                                       : PlacedLightPolicy.FadeSeconds));
+
+    private void AdvanceVisibleDirtyRefreshes(ICoreClientAPI api, StaticLightSources sources, long bakeStart)
+    {
+        // Continue only after the ordinary transaction published complete depth.
+        // Cold discovery/admissions retain their existing one-map scheduling;
+        // this burst serves demanded, fully visible resident blocker edits only.
+        if (!PlacedLightUpdateExperiment.FastVisibleUpdates || _bake.Active ||
+            _promotedSourcesThisFrame.Count == 0) return;
+        while (_promotedSourcesThisFrame.Count < VisibleEditPromotionLimit &&
+               Stopwatch.GetElapsedTime(bakeStart).TotalMilliseconds <
+               VisibleEditCpuBudgetMilliseconds)
+        {
+            var dirty = ChooseDirty(fullyVisible: true);
+            if (dirty < 0 || !sources.IsDemanded(_slots[dirty].Source)) break;
+            var completed = _promotedSourcesThisFrame.Count;
+            BeginBake(dirty, _slots[dirty].Source, StageKind.Refresh, false);
+            AdvanceBake(api);
+            // The budget is soft by one complete cube, never by a partial face.
+            // Failure or pinned/unfinished work stops the burst immediately.
+            if (_bake.Active || _promotedSourcesThisFrame.Count == completed) break;
+        }
+    }
 
     private void AdvanceBake(ICoreClientAPI api)
     {
         if (!_bake.Active) return;
         if (!_bake.Complete)
         {
+            // Manual experiment: prepare all six faces of an actually visible
+            // light together. Fringe/background work retains the one-face budget;
+            // publication still waits for the complete staging cube.
+            var bounds = _stageKind == StageKind.Replacement ? _stagedBounds : _slots[_stagingSlot].Bounds;
+            _bake.FaceBudget = PlacedLightUpdateExperiment.FastVisibleUpdates &&
+                               bounds.Class == 0 && PlacedLightPolicy.Visible(bounds)
+                ? 6
+                : 1;
             int faces = Math.Min(_bake.Budget, 6 - _bake.NextFace);
             if (!RenderSource(api, new ActiveLight(_bake.Source, Capacity, 1, 0)))
             {
@@ -112,16 +167,21 @@ internal sealed partial class StaticTerrainShadowMaps
                 CancelStage();
                 return;
             }
+
             _bake.Advance(faces);
             if (!_bake.Complete) return;
             _incomingCompletedAt = _time;
             _blendStart = _time;
         }
+
         Slot owner = _slots[_stagingSlot];
         // Block edits change real occluders: switch to the complete six-face
         // refresh immediately. Only ordinary resident replacements crossfade.
         if (!_bake.Immediate && _stageKind == StageKind.Replacement &&
             owner.Priority != PlacedLightPolicy.Offscreen && Blend < 1) return;
+        // A future resumable compute owner can pin sampled depth. Never copy
+        // new contents into a handle still referenced by unfinished GPU work.
+        if (owner.Pins > 0) return;
         PromoteStaging(_stagingSlot);
         if (_stageKind == StageKind.Replacement)
         {
@@ -142,9 +202,14 @@ internal sealed partial class StaticTerrainShadowMaps
             // A placement is an intentional visible change. Publish its first
             // complete map at full strength rather than adding the travel fade.
             if (_bake.Immediate)
-            { owner.FadeAt -= PlacedLightPolicy.FadeSeconds; owner.Fade = 1; }
+            {
+                owner.FadeAt -= PlacedLightPolicy.FadeSeconds;
+                owner.Fade = 1;
+            }
+
             ValidCount++;
         }
+
         owner.Valid = true;
         owner.BakedRevision = owner.Revision;
         owner.Dirty = false;
@@ -156,26 +221,40 @@ internal sealed partial class StaticTerrainShadowMaps
     {
         _active.Clear();
         _readyLights.Clear();
+        _completedLights.Clear();
+        _publicationCandidates.Clear();
         ValidCount = 0;
         for (int i = 0; i < Capacity; i++)
         {
             Slot slot = _slots[i];
             if (!slot.Occupied || !slot.Valid) continue;
             ValidCount++;
+            if (!slot.KnownLoaded) continue;
+            _completedLights.Add(new ActiveLight(slot.Source, i, 1, 0));
             bool transition = _bake.Complete && _stagingSlot == i;
             bool pair = transition && _stageKind == StageKind.Replacement;
             float fade = pair ? slot.Fade * (1 - Blend) : slot.Fade;
             var light = new ActiveLight(slot.Source, i, fade,
                 transition && _stageKind == StageKind.Refresh ? Blend : 0, Capacity, pair) { Bounds = slot.Bounds };
-            _readyLights.Add(light);
-            if (PlacedLightPolicy.Visible(slot.Bounds)) _active.Add(light);
+            _publicationCandidates.Add(light);
         }
+
+        _completedLights.Sort(CompletedOrder);
+        _publicationCandidates.Sort(_publicationOrder);
+        for (int i = 0; i < Math.Min(MaxSources, _publicationCandidates.Count); i++)
+        {
+            var light = _publicationCandidates[i];
+            _readyLights.Add(light);
+            if (PlacedLightPolicy.Visible(light.Bounds)) _active.Add(light);
+        }
+
         if (_bake.Complete && _stageKind == StageKind.Replacement)
         {
             var incoming = new ActiveLight(_bake.Source, Capacity, Blend, 0, -1, true) { Bounds = _stagedBounds };
             _readyLights.Add(incoming);
             if (PlacedLightPolicy.Visible(_stagedBounds)) _active.Add(incoming);
         }
+
         Ready = _readyLights.Count > 0;
         // Geometry can change while the published source records stay equal.
         // Depth writes need no new source upload or coarse tile dispatch.
@@ -184,7 +263,8 @@ internal sealed partial class StaticTerrainShadowMaps
         if (changed)
         {
             for (int i = 0; i < _active.Count; i++) _published[i] = _active[i];
-            _publishedCount = _active.Count; PublicationRevision++;
+            _publishedCount = _active.Count;
+            PublicationRevision++;
         }
     }
 }

@@ -1,0 +1,8 @@
+#version 330 core
+out vec2 texCoord;
+void main() {
+    // A vertex-ID triangle covers the owned output without a vertex buffer.
+    vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+    texCoord = p;
+    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}

@@ -11,6 +11,12 @@ out float blockBrightness;
 out float glowLevel;
 out vec3 blockLight;
 out float sm_voxSunLight;
+// Native first-person copies push the same effect uniform as world programs.
+// A flat scalar carries that draw-wide strength without a separate clone hook.
+flat out float drtVertexNightVisionStrength;
+// Forward shader owners use different position varying names. Publish the
+// actual eye-space position once for an exact per-fragment visor falloff.
+out vec3 drtNightVisionViewPosition;
 
 uniform float flatFogDensity;
 uniform float flatFogStart;
@@ -63,6 +69,7 @@ vec4 getPointLightRgbv(vec3 worldPos, vec3 normalView) {
 }
 
 vec4 applyLightWithoutPointLight(vec4 sunColor, vec4 blockColor, float bGlow) {
+    drtVertexNightVisionStrength = clamp(nightVisionStrength, 0.0, 1.0);
     drtSunLight = sunColor.rgb;
     drtVoxelLight = DRT_BASE_LOCAL_GAIN * blockColor.rgb;
     drtEmissionLight = vec3(DRT_EMISSION_GAIN * bGlow);
@@ -75,6 +82,7 @@ vec4 applyLightWithoutPointLight(vec4 sunColor, vec4 blockColor, float bGlow) {
 }
 
 vec4 applyLightWithNormal(vec3 ambientColor, vec4 lightColor, int renderFlags, vec4 worldPos, vec3 normalView) {
+    drtNightVisionViewPosition = worldPos.xyz;
     float bGlow = float(renderFlags & GlowLevelBitMask) * 0.00390625;
     glowLevel = bGlow / 2.5;
     sm_voxSunLight = drtSunAccess(lightColor.a);
@@ -93,10 +101,13 @@ vec4 applyLightWithNormal(vec3 ambientColor, vec4 lightColor, int renderFlags, v
     // Marked deferred fills select voxel + emission explicitly, while excluded
     // foliage/reflective pixels keep this complete forward fallback illumination.
     drtLocalLight += getPointLightRgbv(worldPos.xyz, normalView).rgb;
-    if (nightVisionStrength > 0.0) {
-        drtLocalLight += vec3(0.1, 0.5, 0.1) * 0.45 * nightVisionStrength;
-        drtSunLight = mix(drtSunLight, vec3(0.1, 0.5, 0.1), nightVisionStrength);
-    }
+    // The neutral visor minimum illuminates nearby material in darkness.
+    // Keep it local so directional shadows cannot extinguish it; AgX's input
+    // owns the green infrared-style conversion and the native effect fade.
+#ifndef DRT_FRAGMENT_NIGHTVISION_FLOOR
+    float nightFloor = drtNightVisionIllumination(drtVertexNightVisionStrength, worldPos.xyz);
+    drtLocalLight = drtEmissionLight + max(drtLocalLight - drtEmissionLight, vec3(nightFloor));
+#endif
     blockLight = drtSunLight + drtLocalLight;
     return vec4(blockLight, 1.0);
 }

@@ -19,6 +19,8 @@ in vec4 camPos;
 in float damageEffect;
 in float fragFrostAlpha;
 in float voxSunLight;
+in vec3 drtAnimatedInheritedEmission;
+in float drtAnimatedInheritedGlow;
 
 // Our include system is dumb and does not do conditional includes
 // So we add a OIT preprocceor test to oit.fsh as well
@@ -138,6 +140,9 @@ void main() {
     texColor = applyFrostEffect(fragFrostAlpha, texColor, normal, vertexPosition + vec3(seed));
     if (psychedelicStrength > Epsilon) texColor = applyPsychedelicEffect(texColor, vertexPosition, 0);
     if (glitchStrength > Epsilon) texColor = applyRustEffect(texColor, normal, vertexPosition + vec3(seed), 0);
+    // Preserve effected material for independent emission; color already
+    // contains native illumination and must not illuminate emission again.
+    vec3 drtAnimatedEmissionMaterial = texColor.rgb * b;
     
     texColor *= color;
     texColor.rgb *= b;
@@ -159,6 +164,16 @@ else {
         outColor = applyFogAndShadowWithNormal(texColor, fogAmount, normal, 1, intensity, worldPos.xyz);
     }
 
+#endif
+
+    float materialGlow = glowLevel;
+#if defined(DRT_EXPLICIT_SURFACE_LIGHTING) && USEOIT > 0
+    // Native transparent entity parts carry inherited draw-wide glow, while
+    // opaque parts keep only face-authored emission (including eyes/lamps).
+    // Texture alpha remains coverage; it is never repurposed as an emission mask.
+    // Add after directional shading and before fog with the same vertex tint.
+    outColor.rgb += drtAnimatedEmissionMaterial * drtAnimatedInheritedEmission;
+    materialGlow += drtAnimatedInheritedGlow;
 #endif
 
     // SheyderMod: Specular highlight (opaque pass only; the _Oit variant carries no sun glint)
@@ -196,7 +211,7 @@ else {
 #endif
 
 #if USEOIT==0 && SSAOLEVEL > 0
-    outGPosition = vec4(fragPosition.xyz, fogAmount + glowLevel);
+    outGPosition = vec4(fragPosition.xyz, fogAmount + materialGlow);
     outGNormal = vec4(gnormal.xyz, 0);
 #endif
 
@@ -210,9 +225,9 @@ else {
 #endif
 
 #if USEOIT > 0
-    OIT(outColor, glowLevel+glow);
+    OIT(outColor, materialGlow+glow);
 #else
-    outGlow = vec4(glowLevel + glow, 0, 0, color.a);
+    outGlow = vec4(materialGlow + glow, 0, 0, color.a);
 #endif
 
 #if defined(ALLOWDEPTHOFFSET) && ALLOWDEPTHOFFSET > 0

@@ -11,19 +11,26 @@ internal sealed partial class StaticTerrainShadowMaps
     // Keep completed maps, cancel partial transactions, and defer all GL work.
     internal void Pause(StaticLightSources sources, bool justDisabled)
     {
-        if (justDisabled) { CancelStage(); _nextSchedulerWake = 0; }
+        if (justDisabled)
+        {
+            CancelStage();
+            _nextSchedulerWake = 0;
+        }
+
         if (sources.ChangedChunks.Count == 0 && sources.BlockEdits.Count == 0) return;
         for (int i = 0; i < Capacity; i++)
         {
             Slot slot = _slots[i];
             if (!slot.Occupied || !(PlacedLightGeometry.EditsTouch(slot.Source, sources.BlockEdits) ||
-                PlacedLightGeometry.ChunksTouch(slot.Source, sources.ChangedChunks))) continue;
+                                    PlacedLightGeometry.ChunksTouch(slot.Source, sources.ChangedChunks))) continue;
             slot.Revision++;
             slot.Dirty = true;
             slot.DirtySince = Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
-            slot.RecheckAt = sources.NativeGeometryNotifications &&
-                PlacedLightGeometry.ChunksTouch(slot.Source, sources.ChangedChunks) ? 0 :
-                slot.DirtySince + PlacedLightGeometry.EditFallbackSeconds;
+            // Hook-path exact edits have already waited in the notification
+            // fallback. Do not impose the same delay a second time here.
+            slot.RecheckAt = sources.NativeGeometryNotifications
+                ? 0
+                : slot.DirtySince + PlacedLightGeometry.EditFallbackSeconds;
             _nextSchedulerWake = 0;
         }
     }
@@ -35,37 +42,39 @@ internal sealed partial class StaticTerrainShadowMaps
         long start = Stopwatch.GetTimestamp();
         _time = start / (double)Stopwatch.Frequency;
         FacesBakedThisFrame = 0;
-        LastBakeCpuMilliseconds = 0;
+        ResetPromotionBatch();
         UpdatedThisFrame = false;
-        if (PlacedLightGpuProfile.Enabled) PollGpuTimers();
         if (_sourceGeneration != sources.WorldGeneration)
         {
             _world = api.World;
             _sourceGeneration = sources.WorldGeneration;
             Invalidate();
         }
+
         if (!Ensure(api))
         {
             Ready = false;
-            LastSchedulerCpuMilliseconds = LastTotalCpuMilliseconds = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
             return;
         }
+
         // A settled area owns reusable slots/publication. Only actual input
         // changes, unfinished work or transition deadlines wake the scheduler.
         if (_lastSourceRevision == sources.Revision && _lastViewRevision == sources.ViewRevision &&
-            _lastResidencyRevision == _residencyRevision && sources.ChangedChunks.Count == 0 && sources.BlockEdits.Count == 0 &&
+            _lastResidencyRevision == _residencyRevision && sources.ChangedChunks.Count == 0 &&
+            sources.BlockEdits.Count == 0 &&
             !_pending.DiscoveryPending && !_bake.Active && _time < _nextSchedulerWake)
         {
-            LastSchedulerCpuMilliseconds = LastTotalCpuMilliseconds = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
             return;
         }
+
         UpdatedThisFrame = true;
         // Protect around the character even in third person. Snapshot once
         // per scheduler wake; camera distance still determines baking order.
         var playerPosition = api.World.Player?.Entity?.Pos;
         _retentionWorld.Set(playerPosition?.X ?? cameraWorld.X,
             playerPosition?.InternalY ?? cameraWorld.Y, playerPosition?.Z ?? cameraWorld.Z);
-        _lastSourceRevision = sources.Revision; _lastViewRevision = sources.ViewRevision;
+        _lastSourceRevision = sources.Revision;
+        _lastViewRevision = sources.ViewRevision;
         UpdateSlots(sources, cameraWorld, view, projection);
         _pending.ResidencyRevision = _residencyRevision;
         _pending.WeakestResidentPriority = WeakestResidentPriority();
@@ -89,6 +98,7 @@ internal sealed partial class StaticTerrainShadowMaps
             CancelStage();
             if (admission) ReleaseSlot(cancelled);
         }
+
         if (_bake.Active && _bake.Background && (visible >= 0 || dirty >= 0))
         {
             // An incomplete background map owns no sampled data and can yield immediately.
@@ -96,6 +106,7 @@ internal sealed partial class StaticTerrainShadowMaps
             CancelStage();
             ReleaseSlot(cancelled);
         }
+
         ValidateStage(sources, cameraWorld, view, projection);
         if (!_bake.Active)
         {
@@ -104,17 +115,14 @@ internal sealed partial class StaticTerrainShadowMaps
                 BeginBake(placedMissing, _slots[placedMissing].Source, StageKind.Admission, false);
             else if (placement >= 0)
                 AdmitPending(placement, false);
-            else if (dirty >= 0 && _time - _slots[dirty].DirtySince >= 1)
-                BeginBake(dirty, _slots[dirty].Source, StageKind.Refresh, false);
-            // Compare ordinary visible refreshes/admissions by camera distance;
-            // intentional placements and the existing aged-refresh guard stay first.
-            else if (missing >= 0 && (visible < 0 || _slots[missing].CameraDistance <= _pending.At(visible).Distance) &&
-                (dirty < 0 || _slots[missing].CameraDistance < _slots[dirty].CameraDistance))
-                BeginBake(missing, _slots[missing].Source, StageKind.Admission, false);
-            else if (visible >= 0 && (dirty < 0 || _pending.At(visible).Distance < _slots[dirty].CameraDistance))
-                AdmitPending(visible, false);
+            // Refresh lighting already on screen before ordinary cold arrivals.
+            // A sparse block edit must not wait behind exploration/discovery.
             else if (dirty >= 0)
                 BeginBake(dirty, _slots[dirty].Source, StageKind.Refresh, false);
+            else if (missing >= 0 && (visible < 0 || _slots[missing].CameraDistance <= _pending.At(visible).Distance))
+                BeginBake(missing, _slots[missing].Source, StageKind.Admission, false);
+            else if (visible >= 0)
+                AdmitPending(visible, false);
             else
             {
                 int background = ChooseMissing(false);
@@ -126,11 +134,22 @@ internal sealed partial class StaticTerrainShadowMaps
                 }
             }
         }
-        LastSchedulerCpuMilliseconds = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
-        AdvanceBake(api);
+
+        var bakeStart = Stopwatch.GetTimestamp();
+        // One asynchronous interval covers the entire frame's bake burst,
+        // including complete layer promotions. Per-map queries would report
+        // only a fraction of a four-map edit while exhausting the two-slot ring.
+        try
+        {
+            AdvanceBake(api);
+            AdvanceVisibleDirtyRefreshes(api, sources, bakeStart);
+        }
+        finally
+        {
+        }
+
         Publish();
         ScheduleNextWake();
-        LastTotalCpuMilliseconds = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
     }
 
     private void UpdateSlots(StaticLightSources sources, Vec3d camera, double[] view, float[] projection)
@@ -141,29 +160,62 @@ internal sealed partial class StaticTerrainShadowMaps
         {
             Slot slot = _slots[i];
             if (!slot.Occupied) continue;
-            if (!sources.TryGet(slot.Source, out var current)) { ReleaseSlot(i); continue; }
+            if (!sources.TryGet(slot.Source, out var current))
+            {
+                if (!slot.Valid && slot.Pins == 0)
+                {
+                    ReleaseSlot(i);
+                    continue;
+                }
+
+                // Source truth is currently absent. Retain cold depth, but
+                // exclude its contribution until the loaded identity returns.
+                if (slot.KnownLoaded)
+                {
+                    slot.Revision++;
+                    slot.Dirty = true;
+                    slot.DirtySince = _time;
+                }
+
+                slot.KnownLoaded = false;
+                slot.Priority = PlacedLightPolicy.Offscreen;
+                slot.Fade = 0;
+                if (slot.ExitAt < 0) slot.ExitAt = _time;
+                continue;
+            }
+
+            slot.KnownLoaded = true;
             slot.Source = current;
             double distance = PlacedLightPendingQueue.Distance(slot.Source, camera);
             slot.CameraDistance = distance;
             slot.PlayerDistance = PlacedLightPendingQueue.Distance(slot.Source, _retentionWorld);
-            bool inRange = PlacedLightPendingQueue.InRange(slot.Source, distance);
+            bool inRange = sources.IsDemanded(slot.Source) && PlacedLightPendingQueue.InRange(slot.Source, distance);
             if (!inRange)
             {
-                if (!slot.Valid) { ReleaseSlot(i); continue; }
+                if (!slot.Valid)
+                {
+                    ReleaseSlot(i);
+                    continue;
+                }
+
                 if (slot.ExitAt < 0) slot.ExitAt = _time;
             }
             else
             {
                 slot.ExitAt = -1;
             }
+
             // Cold maps keep their six faces in the fixed allocation. Distance
             // affects publication/victim priority rather than destroying depth.
-            slot.Bounds = inRange ? PlacedLightView.ForShadowCulling(
-                PlacedLightView.Project(slot.Source, view, projection), ViewCullingEnabled) :
-                new PlacedLightView.Bounds(0, 0, 0, 0, 2, 0, 0, 0);
+            slot.Bounds = inRange
+                ? PlacedLightView.Project(slot.Source, view, projection)
+                : new PlacedLightView.Bounds(0, 0, 0, 0, 2, 0, 0, 0);
             slot.Priority = inRange ? PlacedLightPolicy.Priority(slot.Bounds, distance) : PlacedLightPolicy.Offscreen;
-            slot.Fade = slot.Valid ? PlacedLightPolicy.Smooth((_time - slot.FadeAt) / PlacedLightPolicy.FadeSeconds) : 0;
-            if (slot.ExitAt >= 0) slot.Fade *= 1 - PlacedLightPolicy.Smooth((_time - slot.ExitAt) / PlacedLightPolicy.ExitSeconds);
+            slot.Fade = slot.Valid
+                ? PlacedLightPolicy.Smooth((_time - slot.FadeAt) / PlacedLightPolicy.FadeSeconds)
+                : 0;
+            if (slot.ExitAt >= 0)
+                slot.Fade *= 1 - PlacedLightPolicy.Smooth((_time - slot.ExitAt) / PlacedLightPolicy.ExitSeconds);
             // The same cached bounds drive hit accounting and compute tile coverage.
             if (slot.Valid && slot.Fade > 0 && slot.Priority < PlacedLightPolicy.Offscreen) slot.LastHit = _time;
             bool edited = PlacedLightGeometry.EditsTouch(slot.Source, sources.BlockEdits);
@@ -173,15 +225,19 @@ internal sealed partial class StaticTerrainShadowMaps
                 slot.Revision++;
                 if (!slot.Dirty) slot.DirtySince = _time;
                 slot.Dirty = true;
-                // Exact edits survive a missed upload. Wait for usable geometry
-                // or one bounded fallback; keep sampling the complete old map.
-                slot.RecheckAt = uploaded && sources.NativeGeometryNotifications ? 0 :
-                    _time + PlacedLightGeometry.EditFallbackSeconds;
+                // With the hook, exact edits already passed the bounded upload
+                // fallback. Without it, still wait for native geometry to settle.
+                // Completed resident depth remains readable throughout either wait.
+                slot.RecheckAt = sources.NativeGeometryNotifications
+                    ? 0
+                    : _time + PlacedLightGeometry.EditFallbackSeconds;
             }
+
             if (slot.RecheckAt > 0 && _time >= slot.RecheckAt)
             {
                 slot.RecheckAt = 0;
             }
+
             if (slot.Valid) ValidCount++;
             if (slot.Priority < PlacedLightPolicy.Offscreen)
             {
@@ -200,10 +256,12 @@ internal sealed partial class StaticTerrainShadowMaps
         Slot slot = _slots[index];
         slot.Source = source;
         slot.Occupied = true;
+        slot.KnownLoaded = true;
         slot.Valid = slot.Dirty = false;
         slot.Immediate = false;
         slot.Fade = 0;
         slot.Generation++;
+        slot.Pins = 0;
         slot.Revision = slot.BakedRevision = 0;
         slot.LastHit = double.NegativeInfinity;
         slot.CompletedAt = slot.FadeAt = slot.DirtySince = _time;
@@ -220,6 +278,7 @@ internal sealed partial class StaticTerrainShadowMaps
     {
         Slot slot = _slots[index];
         if (!slot.Occupied) return;
+        if (slot.Pins > 0) return;
         if (_stagingSlot == index) CancelStage();
         _residents.Remove(StaticLightSources.Identity(slot.Source));
         _residencyRevision++;
@@ -234,10 +293,12 @@ internal sealed partial class StaticTerrainShadowMaps
         for (int i = 0; i < Capacity; i++)
         {
             Slot slot = _slots[i];
-            if (!slot.Occupied || slot.Valid || _time < slot.FailedUntil || _time < slot.RecheckAt ||
+            if (!slot.Occupied || !slot.KnownLoaded || slot.Valid || _time < slot.FailedUntil ||
+                _time < slot.RecheckAt ||
                 (slot.Priority < PlacedLightPolicy.Offscreen) != visible) continue;
             if (chosen < 0 || BakeBefore(slot, _slots[chosen])) chosen = i;
         }
+
         return chosen;
     }
 
@@ -247,24 +308,27 @@ internal sealed partial class StaticTerrainShadowMaps
         for (int i = 0; i < Capacity; i++)
         {
             Slot slot = _slots[i];
-            if (!slot.Occupied || slot.Valid || !slot.Immediate || _time < slot.FailedUntil ||
+            if (!slot.Occupied || !slot.KnownLoaded || slot.Valid || !slot.Immediate || _time < slot.FailedUntil ||
                 _time < slot.RecheckAt) continue;
             if (chosen < 0 || BakeBefore(slot, _slots[chosen])) chosen = i;
         }
+
         return chosen;
     }
 
-    private int ChooseDirty()
+    private int ChooseDirty(bool fullyVisible = false)
     {
         int chosen = -1;
         for (int i = 0; i < Capacity; i++)
         {
             Slot slot = _slots[i];
-            if (!slot.Occupied || !slot.Valid || !slot.Dirty || slot.ExitAt >= 0 ||
+            if (!slot.Occupied || !slot.KnownLoaded || !slot.Valid || !slot.Dirty || slot.ExitAt >= 0 ||
                 slot.Priority == PlacedLightPolicy.Offscreen || _time < slot.FailedUntil ||
-                _time < slot.RecheckAt) continue;
+                _time < slot.RecheckAt || fullyVisible &&
+                (slot.Bounds.Class != 0 || !PlacedLightPolicy.Visible(slot.Bounds))) continue;
             if (chosen < 0 || BakeBefore(slot, _slots[chosen])) chosen = i;
         }
+
         return chosen;
     }
 

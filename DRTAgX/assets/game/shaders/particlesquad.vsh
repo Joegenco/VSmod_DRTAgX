@@ -93,7 +93,27 @@ void main()
 	worldPos = applyGlobalWarping(worldPos);
 	
 	vec4 cameraPos = mvmat * worldPos;
-	color = baseColor * applyLight(rgbaAmbientIn, rgbaLightIn, renderFlags, cameraPos) * rgbaBlockIn;
+	int lightingFlags = renderFlags;
+	if (rainParticle) {
+		// Native rain's low-byte glow 32 is a visibility aid, but shared HDR
+		// lighting turns it into constant emission even in darkness. Remove
+		// those 32 units before lighting; retain any additional authored glow
+		// and all higher geometry flags, including the bit-31 rain marker.
+		int rainGlow = max((renderFlags & GlowLevelBitMask) - 32, 0);
+		lightingFlags = (renderFlags & ~GlowLevelBitMask) | rainGlow;
+	}
+	vec4 particleLight = applyLight(rgbaAmbientIn, rgbaLightIn, lightingFlags, cameraPos);
+	// Rain still opts out of the emissive bloom mask. Ordinary glowing quads
+	// retain both their lighting and bloom; no night-time multiplier affects them.
+	if (rainParticle) glowLevel = 0.0;
+#ifdef DRT_EXPLICIT_SURFACE_LIGHTING
+	// Particle colors are authored RGB, like terrain albedo. Decode only the
+	// material once per vertex; raw light/glow and coverage remain linear.
+	color = vec4(pow(max(baseColor.rgb * rgbaBlockIn.rgb, vec3(0.0)), vec3(2.2)), rgbaBlockIn.a);
+#else
+	// Native includes still own the earliest startup shader compilation.
+	color = baseColor * particleLight * rgbaBlockIn;
+#endif
 	color.a = rgbaBlockIn.a;
 	rgbaFog = rgbaFogIn;
 
@@ -101,14 +121,16 @@ void main()
 		color.a = min(1, 1.05*color.a * (1.2 - clamp(1 - 7*vexPos.y, 0, 1)));
 	}
 	
-	calcShadowMapCoords(mvmat, vec4(worldPos.x + particlePosition.x, worldPos.y + particlePosition.y, worldPos.z + particlePosition.z, worldPos.w));
- 
 	// 4. Done.
 	gl_Position = projectionMatrix * cameraPos;
 #ifdef DRT_FOG_TRANSPORT
 	drtParticleWorldPos = (drtAtmosphereInvView * cameraPos).xyz;
+	// Billboard/stretch coordinates are camera-facing. Shadow the actual
+	// rendered world position, matching the shared fog and lighting receiver.
+	calcShadowMapCoords(modelViewMatrix, vec4(drtParticleWorldPos, 1.0));
 #else
 	drtParticleWorldPos = particlePosition + worldPos.xyz;
+	calcShadowMapCoords(mvmat, vec4(drtParticleWorldPos, worldPos.w));
 #endif
 	fogAmount = getFogLevel(vec4(particlePosition, 0), fogMinIn, fogDensityIn);
 }

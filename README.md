@@ -1,90 +1,57 @@
-# DRT AgX
+# DRTAgX 2.1.0
 
-DRT AgX is a client-side graphics mod for Vintage Story. It adds an AgX display
-transform, HDR bloom and exposure, atmospheric lighting and fog, and shadows for
-placed and moving lights through the game's existing rendering pipeline.
+Client-side graphics mod for **Vintage Story 1.22.7**, by **Joegen**.
+It builds on the game's rendering and SheyderMod rather than replacing the engine.
 
-Current version: **2.0.3**. Author: **Joegen**.
+- AgX tone mapping, HDR bloom and automatic exposure.
+- Atmospheric sky, ambient lighting, clouds, fog and underwater light absorption.
+- Cached placed-light lighting and shadows, prioritizing visible surfaces and local edits.
+- Shadows from held, dropped and moving lights, including animated entities.
+- Lighting fixes for foliage, particles, transparent materials and night vision.
+- Optional compatibility with ChunkLod, Distant Vistas, GhostChunks, SMAA and RainCurtains.
 
-## Requirements
+Install DRTAgX alongside **SheyderMod 1.1.3**. Press **O** for DRTAgX settings and
+**F8** for Sheyder's other effects. Deferred rendering stays enabled in normal play.
+Versioned defaults handle both mods' settings; outdated settings reset on upgrade.
+Performance mode trades shadow/effect detail for speed. The hardware target is
+an OpenGL 4.6-capable GPU with an 8 GB VRAM budget.
 
-- Vintage Story **1.22.7**.
-- SheyderMod **1.1.3** installed in the client Mods directory.
-- A graphics driver supporting **OpenGL 4.3 core**.
-- The **.NET 10 SDK** to build from source.
+## Build from source
 
-Engine and dependency binaries are read from your own game installation and
-are not distributed in this repository.
-
-## Build
-
-Set `VINTAGE_STORY` to the installation directory containing `VintagestoryAPI.dll`
-and `Lib/`, then build the solution:
+Install the **.NET 10 SDK** and set `VINTAGE_STORY` to your game installation
+(the directory containing `VintagestoryAPI.dll`, `Lib/` and `Mods/`).
 
 ```powershell
-# PowerShell: replace this path with your installation.
 $env:VINTAGE_STORY = 'C:\path\to\Vintagestory'
 dotnet build DRTAgX.sln -c Release
 ```
 
 ```sh
-# Linux/macOS: replace this path with your installation.
 export VINTAGE_STORY='/path/to/vintagestory'
 dotnet build DRTAgX.sln -c Release
 ```
 
-The mod output is `DRTAgX/bin/Release/Mods/mod/`. Ordinary builds copy the shader
-and texture assets alongside the DLL on every platform.
+Output: `DRTAgX/bin/Release/Mods/mod/`. Assets are copied alongside the DLL on every
+platform. Copy that folder into your client Mods directory, or ZIP its contents
+with `modinfo.json` at the archive root. Remove any other DRTAgX version first.
+The game supplies all referenced libraries; they are not included in this repo.
 
-To create an installable ZIP and SHA-256 checksum:
+## Find your way around
 
-```powershell
-./build.ps1
-```
+- `Core/`: lifecycle, settings, dependency defaults and moving-light sources.
+- `Atmosphere/`: sky, ambient light, fog and distant-terrain/weather compatibility.
+- `HDR/`: scene buffers, bloom, exposure and final composition.
+- `Lighting/` and `Shadows/`: placed-light discovery/caches and moving shadow maps.
+- `Rendering/`: native hooks, deferred composition, GPU resources and uniforms.
+- `UI/`: in-game settings. `assets/`: GLSL and textures.
 
-```sh
-sh ./build.sh
-```
-
-The packaging command restores Cake build dependencies from NuGet and writes
-`Releases/DRTAgX_2.0.3.zip` and its checksum. It packages only the mod DLL,
-metadata, and runtime assets. Existing archives are preserved.
-
-## Install and configure
-
-Copy the generated ZIP into your Vintage Story data directory's `Mods/` folder,
-alongside SheyderMod, and restart the client. Avoid installing multiple DRT AgX
-versions together.
-
-Press **O** to open the mod settings. Settings are saved in
-`ModConfig/DRTAgX.json` in the game's data directory.
-
-## Source layout
-
-| Directory | Responsibility |
-| --- | --- |
-| `DRTAgX/Core/` | Lifecycle, settings, and moving/entity light discovery |
-| `DRTAgX/Atmosphere/` | Atmospheric sky, ambient lighting, fog, and LOD integration |
-| `DRTAgX/HDR/` | HDR scene buffers, bloom, exposure, and final composition |
-| `DRTAgX/Lighting/` | Placed light indexing, GPU tiles, and shader bindings |
-| `DRTAgX/Shadows/` | Moving and placed light shadow rendering and caches |
-| `DRTAgX/Rendering/` | Native rendering integration, uniforms, and profiling |
-| `DRTAgX/UI/` | In-game configuration dialog |
-| `DRTAgX/assets/` | Runtime GLSL shaders and textures |
-| `CakeBuild/` | Release packaging and archive verification |
-| `Tests/` | CPU checks and OpenGL regression harnesses |
-
-See [Tests/README.md](Tests/README.md) for check commands. C# changes require a
-rebuild and client restart; shader changes can use the game's shader reload.
-Windows developers may opt into live source assets with
-`dotnet build DRTAgX/DRTAgX.csproj -c Debug -p:UseAssetJunction=true` in a fresh
-output directory. The build preserves any existing directory or unexpected link.
-
-[AGENTS.md](AGENTS.md) provides a few optional instructions for coding assistants.
+These folders are inside `DRTAgX/`. C# changes need a rebuild and client restart;
+shaders can use the game's **Alt+F1** reload. This source tree contains the Release
+implementation, without tests, probes or private development notes.
 
 ## License
 
-[WTFPL v2](LICENSE): do whatever the fuck you want with this project, except
-the contents of `DRTAgX/assets/sheydermod/` (packaged as `assets/sheydermod/`).
-Those contents are excluded and retain their original licensing terms and
-copyright holders' permissions.
+[WTFPL v2](LICENSE): do whatever the fuck you want with the project, except the
+contents of `DRTAgX/assets/sheydermod/`. Those retain their original licensing
+terms and copyright holders' permissions. Fork it or use snippets freely within
+that scope.

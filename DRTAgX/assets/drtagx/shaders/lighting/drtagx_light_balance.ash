@@ -18,24 +18,54 @@ const float DRT_EMISSION_GAIN = 4.0;
 const float DRT_SUN_SHADOW_GAIN = 0.65;
 const vec3 DRT_LUMINANCE = vec3(0.2126, 0.7152, 0.0722);
 
-float drtPlacedFoliageFacing(vec3 planeNormal, vec3 toLight, vec3 toEye) {
-    float n2 = dot(planeNormal, planeNormal), l2 = dot(toLight, toLight), v2 = dot(toEye, toEye);
-    if (n2 <= 1e-6 || l2 <= 1e-10 || v2 <= 1e-10) return 1.0;
-    vec3 normal = planeNormal * inversesqrt(n2);
-    float viewSide = dot(normal, toEye) * inversesqrt(v2);
-    // A no-cull card has two visible sides. Orient to the camera in its rest
-    // pose, not mesh winding or a synthetic shade:false authored normal.
-    float facing = dot(normal, toLight) * inversesqrt(l2) * (viewSide < 0.0 ? -1.0 : 1.0);
-    // A narrow edge-on band (~0.6..2.3 degrees) removes sign-flip flashes.
-    // Ordinary PLS keeps exactly 1:0.25 for unobstructed facing/away sides.
-    float edgeTolerance = smoothstep(0.01, 0.04, abs(viewSide));
-    return 0.25 + 0.75 * max(facing, 0.0) * edgeTolerance;
+float drtNightVisionIllumination(float strength, vec3 receiverView) {
+    if (!(strength > 0.0)) return 0.0;
+    // A visor emitter has unit illumination at the eye and a 64-block shoulder.
+    // The squared range envelope reaches zero smoothly at 128 blocks, without
+    // a square root or a hard cutoff. Eye-space positions keep range independent
+    // of world/render origins and of the PLS cache's snapped receiver positions.
+    float distanceSquared = dot(receiverView, receiverView);
+    float range = max(1.0 - distanceSquared / (128.0 * 128.0), 0.0);
+    return clamp(strength, 0.0, 1.0) * range * range /
+        (1.0 + distanceSquared / (64.0 * 64.0));
 }
 
-// Share an eight-source harmonic budget across placed and moving lighting.
-// Rank actual receiver radiance, so occluded/out-of-range lights use no rank.
+// Moving lights retain the eight-source harmonic budget. The separately bounded
+// placed-light sum below blends every visible contribution without rank sorting.
 const int DRT_LIGHT_BUDGET = 8;
 const float DRT_LIGHT_TIE_WIDTH = 0.05;
+
+// Placed lights blend every visible source continuously instead of sorting
+// eight per-pixel ranks. Preserve one lamp and the author's equal-eight gain;
+// the brightest visible lamp bounds dense overlap without a hard source cutoff.
+const float DRT_PLACED_OVERLAP_GAIN = 2.717857142857;
+const float DRT_PLACED_LOG_GAIN = (DRT_PLACED_OVERLAP_GAIN - 1.0) / 3.0;
+// Half-strength placed RGB across cached, custom and unshadowed model receivers.
+// Coverage and native material emission remain independent of this light gain.
+const float DRT_PLACED_INTENSITY = 0.5;
+struct DrtPlacedLightSum { vec3 rgb; float luminance; float peak; };
+void drtClearPlacedSum(out DrtPlacedLightSum lights) {
+    lights.rgb = vec3(0.0); lights.luminance = 0.0; lights.peak = 0.0;
+}
+void drtAddPlacedLight(inout DrtPlacedLightSum lights, vec3 contribution) {
+    float energy = dot(contribution, DRT_LUMINANCE);
+    if (!(energy > 0.0) || isnan(energy) || isinf(energy)) return;
+    lights.rgb += contribution;
+    lights.luminance += energy;
+    lights.peak = max(lights.peak, energy);
+}
+vec3 drtPlacedSumRadiance(DrtPlacedLightSum lights) {
+    if (!(lights.peak > 0.0) || !(lights.luminance > 0.0)) return vec3(0.0);
+    // A sole visible source (including one merged replacement pair) has L=M.
+    // Its overlap gain is one; apply placed intensity without a logarithm.
+    if (lights.luminance == lights.peak) return lights.rgb * DRT_PLACED_INTENSITY;
+    // L/M measures effective overlap. A logarithmic shoulder matches H8 at
+    // eight equal lamps; beyond it RGB stays bounded by H8 times the peak.
+    // One scalar preserves the hue of the summed, shadowed linear radiance.
+    float overlap = max(lights.luminance / lights.peak, 1.0);
+    float gain = min(DRT_PLACED_OVERLAP_GAIN, 1.0 + DRT_PLACED_LOG_GAIN * log2(overlap));
+    return lights.rgb * (DRT_PLACED_INTENSITY * min(1.0, gain / overlap));
+}
 
 float drtLightRelativeStrength(float a, float b) {
     return abs(a - b) / max(max(a, b), 1e-8);
@@ -184,17 +214,28 @@ vec2 drtUnpackSunBlock(float packedLightValue) {
 vec3 drtDynamicContribution(vec3 delta, vec3 authored, vec3 normal, float visibility) {
     float range = length(authored);
     float peak = max(authored.r, max(authored.g, authored.b));
+    if (!(range > 1e-6) || isinf(range) || peak <= 1e-6)
+        return vec3(0.0);
+    // Match the CPU/deferred moving range without promoting empty emitters.
+    range = clamp(range, 16.0, 32.0);
     float d2 = dot(delta, delta);
-    if (range <= 1e-6 || peak <= 1e-6 || d2 >= range * range || d2 > 2304.0)
+    if (d2 >= range * range)
         return vec3(0.0);
     float d = sqrt(d2);
     float w = max(0.0, 1.0 - d / range);
     float n2 = dot(normal, normal);
     // At the emitter center no direction is defined; retain finite, full radiance.
-    float facing = n2 > 1e-6 && d2 > 1e-10
-        ? 0.28 + 0.72 * max(dot(normal * inversesqrt(n2), delta / d), 0.0) : 1.0;
+    float towardsLight = n2 > 1e-6 && d2 > 1e-10
+        ? max(dot(normal * inversesqrt(n2), delta / d), 0.0) : 0.0;
+    float facing = n2 > 1e-6 && d2 > 1e-10 ? 0.28 + 0.72 * towardsLight : 1.0;
+    float surfaceVisibility = min(facing, clamp(visibility, 0.0, 1.0));
+#ifdef DRT_ANIMATED_POINT_FACING_GAIN
+    // Apply after visibility so the gain is not clipped back to one, and
+    // hidden contributions stay zero. Only entityanimated defines this gain.
+    surfaceVisibility *= 1.0 + (DRT_ANIMATED_POINT_FACING_GAIN - 1.0) * clamp(towardsLight, 0.0, 1.0);
+#endif
     return DRT_DYNAMIC_GAIN * max(authored / peak, vec3(0.0)) *
-        (w * sqrt(w) / (1.0 + 0.25 * d)) * min(facing, clamp(visibility, 0.0, 1.0));
+        (w * sqrt(w) / (1.0 + 0.25 * d)) * surfaceVisibility;
 }
 
 // Fixed eight-rank state keeps receiver scratch out of dynamically indexed

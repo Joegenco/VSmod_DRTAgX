@@ -9,19 +9,13 @@ internal static class PlacedLightView
     internal const double ReceiverRange = 128.0;
     internal const double DiscoveryRange = ReceiverRange + StaticTerrainShadowMaps.Range;
     internal const int OffViewPriority = 3;
-    // A 10% NDC guard keeps edge maps warm. Within that guard publish a
-    // conservative rectangle; the pixel distance test still enforces light reach.
-    internal const float ResidencyExtent = 1.1f;
+    // A 25% NDC guard starts preparing edge maps before they enter the view.
+    // This widens source residency only: surface memo cells still fill on demand.
+    // Keep the actual projected rectangle and all existing bake/range budgets.
+    internal const float ResidencyExtent = 1.25f;
 
     internal readonly record struct Bounds(float MinX, float MaxX, float MinY, float MaxY,
         int Class, float CenterX, float CenterY, double CenterDepth);
-
-    internal static Bounds ForShadowCulling(Bounds projected, bool enabled)
-    {
-        // With view culling off, range-limited sources compete by distance and
-        // cover every tile. Existing distance tests still bound their radiance.
-        return enabled ? projected : new Bounds(-1, 1, -1, 1, 0, float.NaN, float.NaN, projected.CenterDepth);
-    }
 
     internal static int Priority(Bounds bounds)
     {

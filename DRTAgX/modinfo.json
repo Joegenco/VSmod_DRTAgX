@@ -1,10 +1,14 @@
 {
-    "type": "code",
-    "modid": "drtagx",
-    "name": "DRT AgX",
-    "authors": [ "Joegen" ],
-    "description": "Client-side AgX display transform for Vintage Story.",
-    "version": "2.0.3",
-    "side": "client",
-    "dependencies": {"sheydermod": "1.1.3"}
+  "type": "code",
+  "modid": "drtagx",
+  "name": "DRT AgX",
+  "authors": [
+    "Joegen"
+  ],
+  "description": "Client-side AgX tone mapping, HDR, atmospheric lighting and cached placed-light shadows for Vintage Story.",
+  "version": "2.1.0",
+  "side": "client",
+  "dependencies": {
+    "sheydermod": "1.1.3"
+  }
 }

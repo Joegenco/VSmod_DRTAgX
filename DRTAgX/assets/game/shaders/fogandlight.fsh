@@ -86,7 +86,7 @@ vec3 palette( float t ){
 vec4 applyPsychedelicEffect(vec4 texColor, vec3 rustVec, int sub) {
     if (texColor.a <= 0) return texColor;
 
-    float df = clamp((gl_FragCoord.w*20 - 0.3) * 20, 0.09, 1);
+    float df = clamp((gl_FragCoord.w*20 - 0.3) * 20, 0.09, 1.0);
     
     vec3 uv = rustVec;
     vec3 uv0 = uv;
@@ -161,7 +161,7 @@ vec4 applyReflectiveEffect(vec4 texColor, inout float glow, int renderFlags, vec
             clamp(dot(drtSunEffectColor(), DRT_LUMINANCE), 0.0, 1.0);
         
         texColor.rgb = drtSunOnlyMultiplier(texColor.rgb, vec3(1.0) + vec3(nb * fd) / 2.0);
-        texColor.a = clamp(texColor.a + nb*fd, texColor.a/2, 1);
+        texColor.a = clamp(texColor.a + nb*fd, texColor.a/2, 1.0);
         glow+=nb*fd * 0.15;
         
         return texColor;
@@ -425,3 +425,4 @@ float getFogLevel(float fogMin, float fogDensity, float worldPosY) {
     float depth = 2.0 * zNear * zFar / max(zFar + zNear - (2.0 * gl_FragCoord.z - 1.0) * (zFar - zNear), 0.00001);
     return clamp(1.0 - exp(-max(depth * fogDensity, 0.0)) + fogMin, DRT_MIN_FOG_OPACITY, 1.0);
 }
+

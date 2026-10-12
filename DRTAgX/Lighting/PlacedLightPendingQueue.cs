@@ -18,30 +18,44 @@ internal sealed class PlacedLightPendingQueue
     }
 
     private readonly Entry[] _entries = new Entry[128];
+
     private readonly Dictionary<StaticLightSources.Position, int> _indices = new(128);
+
+    // Receiver feedback arrives asynchronously. Keep a bounded placement
+    // receipt across that delay without admitting an unseen source to baking.
+    private readonly Dictionary<StaticLightSources.Position, double> _placements = new(128);
+    private readonly StaticLightSources.Position[] _expiredPlacements = new StaticLightSources.Position[128];
     private int _cursor, _remaining, _sourceRevision = -1, _residentCount = -1, _residentRevision = -1;
     private readonly PlacedLightViewState _viewState = new();
     internal int ResidencyRevision { get; set; }
     internal int WeakestResidentPriority { get; set; } = int.MaxValue;
-    internal bool ViewCullingEnabled { get; set; } = true;
-    private bool _lastViewCulling = true;
     private double _now;
     internal int InspectedThisFrame { get; private set; }
     internal bool DiscoveryPending => _remaining > 0;
     internal int Count => _indices.Count;
+
     internal int VisibleCount
     {
-        get { int count = 0; foreach (var entry in _entries)
-            if (entry.Occupied && entry.Priority < PlacedLightPolicy.Offscreen) count++; return count; }
+        get
+        {
+            int count = 0;
+            foreach (var entry in _entries)
+                if (entry.Occupied && entry.Priority < PlacedLightPolicy.Offscreen)
+                    count++;
+            return count;
+        }
     }
+
     internal ref Entry At(int index) => ref _entries[index];
 
     internal void Clear()
     {
         Array.Clear(_entries);
         _indices.Clear();
+        _placements.Clear();
         _cursor = 0;
-        _remaining = 0; _sourceRevision = _residentCount = _residentRevision = -1;
+        _remaining = 0;
+        _sourceRevision = _residentCount = _residentRevision = -1;
         _viewState.Reset();
     }
 
@@ -56,11 +70,21 @@ internal sealed class PlacedLightPendingQueue
     {
         InspectedThisFrame = 0;
         _now = now;
+        int expired = 0;
+        foreach (var placement in _placements)
+            if (now >= placement.Value || residents.ContainsKey(placement.Key) ||
+                !sources.TryGet(new StaticLightSources.Source(placement.Key.X, placement.Key.Y,
+                    placement.Key.Z, 0, 0, 0), out _))
+                _expiredPlacements[expired++] = placement.Key;
+        for (int i = 0; i < expired; i++) _placements.Remove(_expiredPlacements[i]);
+        for (int i = 0; i < sources.NewEmitters.Count; i++)
+        {
+            var key = StaticLightSources.Identity(sources.NewEmitters[i]);
+            if (_placements.Count < 128 || _placements.ContainsKey(key)) _placements[key] = now + 2;
+        }
+
         bool geometryChanged = sources.BlockEdits.Count > 0 || sources.ChangedChunks.Count > 0;
         bool viewChanged = _viewState.Update(view, projection);
-        // A style-panel toggle wakes the bounded discovery pass even with a stationary camera.
-        viewChanged |= _lastViewCulling != ViewCullingEnabled;
-        _lastViewCulling = ViewCullingEnabled;
         bool sourceChanged = _sourceRevision != sources.Revision;
         bool residentChanged = _residentRevision != ResidencyRevision || _residentCount != residents.Count;
         if (!viewChanged && !sourceChanged && !residentChanged && !geometryChanged &&
@@ -74,39 +98,62 @@ internal sealed class PlacedLightPendingQueue
         else if (residentChanged && residents.Count <= _residentCount)
             _remaining = Math.Max(_remaining, sources.Sources.Count);
         _sourceRevision = sources.Revision;
-        _residentRevision = ResidencyRevision; _residentCount = residents.Count;
+        _residentRevision = ResidencyRevision;
+        _residentCount = residents.Count;
         for (int i = 0; i < _entries.Length; i++)
         {
             ref Entry entry = ref _entries[i];
             if (!entry.Occupied) continue;
             if (residents.ContainsKey(StaticLightSources.Identity(entry.Source)) ||
-                !sources.TryGet(entry.Source, out var current)) { Remove(i); continue; }
+                !sources.TryGet(entry.Source, out var current) || !sources.IsDemanded(current))
+            {
+                Remove(i);
+                continue;
+            }
+
             entry.Source = current;
             if (viewChanged || sourceChanged)
             {
                 entry.Distance = Distance(current, camera);
-                if (!InRange(current, entry.Distance)) { Remove(i); continue; }
-                entry.Bounds = PlacedLightView.ForShadowCulling(
-                    PlacedLightView.Project(current, view, projection), ViewCullingEnabled);
+                if (!InRange(current, entry.Distance))
+                {
+                    Remove(i);
+                    continue;
+                }
+
+                entry.Bounds = PlacedLightView.Project(current, view, projection);
                 entry.Priority = PlacedLightPolicy.Priority(entry.Bounds, entry.Distance);
             }
         }
+
         // Placement events bypass the rotating discovery cursor. Only the source
         // index's bounded notification batch can add this one-time priority.
         for (int i = 0; i < sources.NewEmitters.Count; i++)
         {
             var added = sources.NewEmitters[i];
-            if (sources.TryGet(added, out var current))
+            if (sources.TryGet(added, out var current) && sources.IsDemanded(current))
                 Enqueue(current, camera, view, projection, residents, now, true);
         }
+
+        // A placement that becomes relevant on this feedback frame bypasses
+        // ordinary rotating discovery too. The receipt set is capped at128.
+        foreach (var placement in _placements)
+            if (sources.TryGet(new StaticLightSources.Source(placement.Key.X, placement.Key.Y,
+                    placement.Key.Z, 0, 0, 0), out var current) && sources.IsDemanded(current))
+                Enqueue(current, camera, view, projection, residents, now, true);
+
         int count = Math.Min(64, Math.Min(_remaining, sources.Sources.Count));
         for (int n = 0; n < count; n++)
         {
             if (_cursor >= sources.Sources.Count) _cursor = 0;
             var source = sources.Sources[_cursor++];
-            InspectedThisFrame++; _remaining--;
-            Enqueue(source, camera, view, projection, residents, now, false);
+            InspectedThisFrame++;
+            _remaining--;
+            if (!sources.IsDemanded(source)) continue;
+            Enqueue(source, camera, view, projection, residents, now,
+                _placements.TryGetValue(StaticLightSources.Identity(source), out double until) && now < until);
         }
+
         if (geometryChanged)
             for (int i = 0; i < _entries.Length; i++)
             {
@@ -116,8 +163,11 @@ internal sealed class PlacedLightPendingQueue
                 // usable caster geometry before another six-face transaction.
                 bool uploaded = PlacedLightGeometry.ChunksTouch(entry.Source, sources.ChangedChunks);
                 if (uploaded || PlacedLightGeometry.EditsTouch(entry.Source, sources.BlockEdits, entry.Immediate))
-                    entry.RecheckAt = uploaded && sources.NativeGeometryNotifications ? 0 :
-                        now + PlacedLightGeometry.EditFallbackSeconds;
+                    // Hook-path exact edits already exhausted their notification
+                    // fallback; new admissions need no second waiting period.
+                    entry.RecheckAt = sources.NativeGeometryNotifications
+                        ? 0
+                        : now + PlacedLightGeometry.EditFallbackSeconds;
             }
     }
 
@@ -127,26 +177,42 @@ internal sealed class PlacedLightPendingQueue
         var key = StaticLightSources.Identity(source);
         if (residents.ContainsKey(key)) return;
         if (_indices.TryGetValue(key, out int existing))
-        { _entries[existing].Immediate |= immediate; return; }
+        {
+            _entries[existing].Immediate |= immediate;
+            return;
+        }
+
         double distance = Distance(source, camera);
         if (!InRange(source, distance)) return;
-        var bounds = PlacedLightView.ForShadowCulling(
-            PlacedLightView.Project(source, view, projection), ViewCullingEnabled);
+        var bounds = PlacedLightView.Project(source, view, projection);
         int free = -1, worst = -1;
         for (int i = 0; i < _entries.Length; i++)
         {
-            if (!_entries[i].Occupied) { free = i; break; }
+            if (!_entries[i].Occupied)
+            {
+                free = i;
+                break;
+            }
+
+            // Preserve an aged waiter through continuous camera discovery.
+            if (!immediate && now - _entries[i].Since >= PlacedLightPolicy.FairAdmissionSeconds) continue;
             if (worst < 0 || Worse(_entries[i], _entries[worst])) worst = i;
         }
-        var incoming = new Entry { Source = source, Distance = distance, Bounds = bounds,
+
+        var incoming = new Entry
+        {
+            Source = source, Distance = distance, Bounds = bounds,
             Priority = PlacedLightPolicy.Priority(bounds, distance), Since = now,
-            Occupied = true, Immediate = immediate };
+            Occupied = true, Immediate = immediate
+        };
         if (free < 0)
         {
+            if (worst < 0) return;
             if (!Worse(_entries[worst], incoming)) return;
             free = worst;
             Remove(free);
         }
+
         _entries[free] = incoming;
         _indices.Add(key, free);
     }
@@ -157,7 +223,8 @@ internal sealed class PlacedLightPendingQueue
         for (int i = 0; i < _entries.Length; i++)
             if (_entries[i].Occupied && _entries[i].Immediate && _now >= _entries[i].RecheckAt &&
                 WeakestResidentPriority >= _entries[i].Priority &&
-                (chosen < 0 || BakeEarlier(_entries[i], _entries[chosen]))) chosen = i;
+                (chosen < 0 || BakeEarlier(_entries[i], _entries[chosen])))
+                chosen = i;
         return chosen;
     }
 
@@ -168,14 +235,14 @@ internal sealed class PlacedLightPendingQueue
         {
             ref Entry entry = ref _entries[i];
             if (!entry.Occupied || now < entry.RecheckAt) continue;
-            if (full && (entry.Immediate ? WeakestResidentPriority < entry.Priority :
-                WeakestResidentPriority <= entry.Priority)) continue;
+            if (full && WeakestResidentPriority < entry.Priority) continue;
             bool onScreen = entry.Priority < PlacedLightPolicy.Offscreen;
             if (onScreen) suppressed.Remove(StaticLightSources.Identity(entry.Source));
             if (onScreen != visible || !visible && suppressed.Contains(StaticLightSources.Identity(entry.Source)) ||
                 !entry.Immediate && !PlacedLightPolicy.CanAdmit(entry.Distance, full, entry.Since, now)) continue;
             if (chosen < 0 || BakeEarlier(entry, _entries[chosen])) chosen = i;
         }
+
         return chosen;
     }
 
@@ -187,21 +254,28 @@ internal sealed class PlacedLightPendingQueue
 
     internal static double Distance(StaticLightSources.Source source, Vec3d camera)
     {
-        double x = source.X + 0.5 - camera.X, y = source.Y + StaticTerrainShadowMaps.SourceHeight - camera.Y,
+        double x = source.X + 0.5 - camera.X,
+            y = source.Y + StaticTerrainShadowMaps.SourceHeight - camera.Y,
             z = source.Z + 0.5 - camera.Z;
         return x * x + y * y + z * z;
     }
 
-    private static bool Worse(Entry a, Entry b) => a.Immediate != b.Immediate ? !a.Immediate : a.Priority > b.Priority ||
-        a.Priority == b.Priority && (a.Distance > b.Distance || a.Distance == b.Distance &&
-            (a.Source.X > b.Source.X || a.Source.X == b.Source.X &&
-                (a.Source.Y > b.Source.Y || a.Source.Y == b.Source.Y && a.Source.Z > b.Source.Z)));
+    private static bool Worse(Entry a, Entry b) => a.Immediate != b.Immediate
+        ? !a.Immediate
+        : a.Priority > b.Priority ||
+          a.Priority == b.Priority && (a.Distance > b.Distance || a.Distance == b.Distance &&
+              (a.Source.X > b.Source.X || a.Source.X == b.Source.X &&
+                  (a.Source.Y > b.Source.Y || a.Source.Y == b.Source.Y && a.Source.Z > b.Source.Z)));
 
-    private static bool BakeEarlier(Entry a, Entry b)
+    private bool BakeEarlier(Entry a, Entry b)
     {
         if (a.Immediate != b.Immediate) return a.Immediate;
         bool visibleA = a.Priority < PlacedLightPolicy.Offscreen, visibleB = b.Priority < PlacedLightPolicy.Offscreen;
         if (visibleA != visibleB) return visibleA;
+        bool agedA = _now - a.Since >= PlacedLightPolicy.FairAdmissionSeconds;
+        bool agedB = _now - b.Since >= PlacedLightPolicy.FairAdmissionSeconds;
+        if (agedA != agedB) return agedA;
+        if (agedA && a.Since != b.Since) return a.Since < b.Since;
         if (a.Distance != b.Distance) return a.Distance < b.Distance;
         return Worse(b, a); // Stable priority/coordinate tie-break for equal distance.
     }

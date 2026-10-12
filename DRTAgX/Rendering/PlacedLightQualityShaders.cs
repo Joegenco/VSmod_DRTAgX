@@ -1,6 +1,7 @@
 using System;
 using HarmonyLib;
 using Vintagestory.API.Client;
+using Vintagestory.API.Common;
 using Vintagestory.Client.NoObf;
 
 namespace DRTAgX;
@@ -10,13 +11,20 @@ internal sealed class PlacedLightQualityShaders : IDisposable
 {
     private const string PatchId = "drtagx.quality.placed.shaders";
     private const string Define = "#define DRT_PERFORMANCE_NO_PLS 1\n";
+    private const string LegacyDiagnosticDefine = "#define DRT_MEMO_LEGACY_DIAGNOSTIC 1\n";
     private static PlacedLightQualityShaders? _instance;
     private readonly Harmony _harmony = new(PatchId);
     private readonly ICoreClientAPI _api;
     private bool _performance, _failed, _synchronized;
     internal static bool QualityReload { get; private set; }
     internal bool CasterChangedThisFrame { get; private set; }
-    private readonly record struct CasterSource(string Vertex, string Fragment, string VertexPrefix, string FragmentPrefix);
+
+    private readonly record struct CasterSource(
+        string Vertex,
+        string Fragment,
+        string VertexPrefix,
+        string FragmentPrefix,
+        string PointGeometry);
 
     private CasterSource? CaptureCaster()
     {
@@ -25,13 +33,23 @@ internal sealed class PlacedLightQualityShaders : IDisposable
             var program = _api.Render.GetEngineShader(EnumShaderProgram.Chunkshadowmap);
             if (program == null || program.Disposed || program.LoadError ||
                 program.VertexShader?.Code == null || program.FragmentShader?.Code == null) return null;
+            // The point clone also owns this geometry stage. Compare its asset
+            // text so a concurrent wind/primitive-policy edit cannot retain old depth.
+            string pointGeometry = _api.Assets.Get(new AssetLocation("drtagx", "shaders/point_shadowmap.gsh")).ToText();
             // Compare actual expanded shader text and all other native options.
             // Concurrent shader edits must invalidate depth even during a mode toggle.
             return new(program.VertexShader.Code, program.FragmentShader.Code,
-                (program.VertexShader.PrefixCode ?? string.Empty).Replace(Define, string.Empty, StringComparison.Ordinal),
-                (program.FragmentShader.PrefixCode ?? string.Empty).Replace(Define, string.Empty, StringComparison.Ordinal));
+                (program.VertexShader.PrefixCode ?? string.Empty)
+                .Replace(Define, string.Empty, StringComparison.Ordinal)
+                .Replace(LegacyDiagnosticDefine, string.Empty, StringComparison.Ordinal),
+                (program.FragmentShader.PrefixCode ?? string.Empty)
+                .Replace(Define, string.Empty, StringComparison.Ordinal)
+                .Replace(LegacyDiagnosticDefine, string.Empty, StringComparison.Ordinal), pointGeometry);
         }
-        catch { return null; } // An unknown source contract cannot retain old depth.
+        catch
+        {
+            return null;
+        } // An unknown source contract cannot retain old depth.
     }
 
     internal PlacedLightQualityShaders(ICoreClientAPI api)
@@ -47,23 +65,32 @@ internal sealed class PlacedLightQualityShaders : IDisposable
             _harmony.Patch(load, postfix: new HarmonyMethod(typeof(PlacedLightQualityShaders), nameof(AfterLoad)));
             _instance = this;
         }
-        catch (Exception ex) { _failed = true; api.Logger.Warning("[DRTAgX] PLS shader quality hook unavailable: " + ex.Message); }
+        catch (Exception ex)
+        {
+            _failed = true;
+            api.Logger.Warning("[DRTAgX] PLS shader quality hook unavailable: " + ex.Message);
+        }
     }
 
     private static void AfterLoad(ShaderProgram program, EnumShaderType shaderType)
     {
-        if (_instance?._performance != true || program == null) return;
+        if (_instance == null || program == null) return;
         IShader? shader = shaderType == EnumShaderType.FragmentShader ? program.FragmentShader :
             shaderType == EnumShaderType.VertexShader ? program.VertexShader : null;
-        if (shader != null && !(shader.PrefixCode ?? string.Empty).Contains(Define, StringComparison.Ordinal))
+        if (shader == null) return;
+        if (_instance._performance && !(shader.PrefixCode ?? string.Empty).Contains(Define, StringComparison.Ordinal))
             shader.PrefixCode += Define;
+        // Shipping receiver programs omit the unreachable legacy lamp loops.
+        // Only an explicit cache-off capture recompiles that comparison path.
     }
 
     internal void BeforeFrame()
     {
         // Strict render-thread Before boundary, once per changed mode. The
         // native registry owns recompilation and all reload notifications.
-        bool next = FrameQuality.Current.Performance;
+        // A local capture can isolate PLS while every other effect stays at
+        // normal quality; ordinary launches still follow Performance mode.
+        var next = FrameQuality.Current.Performance;
         CasterChangedThisFrame = false;
         if (!_synchronized)
         {
@@ -78,15 +105,20 @@ internal sealed class PlacedLightQualityShaders : IDisposable
                 bool fragment = opaque?.FragmentShader?.PrefixCode?.Contains(Define, StringComparison.Ordinal) == true;
                 _performance = vertex == fragment ? vertex : !next;
             }
-            catch { /* Missing programs load with the ordinary native prefix. */ }
+            catch
+            {
+                /* Missing programs load with the ordinary native prefix. */
+            }
         }
+
         if (_failed || next == _performance) return;
         var caster = CaptureCaster();
         _performance = next;
         QualityReload = true;
         try
         {
-            if (!_api.Shader.ReloadShaders()) throw new InvalidOperationException("Native reload reported a shader failure");
+            if (!_api.Shader.ReloadShaders())
+                throw new InvalidOperationException("Native reload reported a shader failure");
         }
         catch (Exception ex)
         {
@@ -94,7 +126,15 @@ internal sealed class PlacedLightQualityShaders : IDisposable
             _performance = false;
             // Rebuild the regular native programs if a specialized variant
             // fails. Runtime caps continue to provide native voxel lighting.
-            try { _api.Shader.ReloadShaders(); } catch { /* Native failure fallback remains authoritative. */ }
+            try
+            {
+                _api.Shader.ReloadShaders();
+            }
+            catch
+            {
+                /* Native failure fallback remains authoritative. */
+            }
+
             _api.Logger.Warning("[DRTAgX] PLS specialization failed; retaining runtime quality caps: " + ex.Message);
         }
         finally

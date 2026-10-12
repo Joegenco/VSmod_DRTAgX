@@ -4,6 +4,8 @@ using Vintagestory.API.Client;
 using Vintagestory.API.MathTools;
 using Vintagestory.Client.NoObf;
 
+// Domain folders intentionally share the mod's root namespace.
+// ReSharper disable CheckNamespace
 namespace DRTAgX;
 
 /// <summary>One ambient snapshot per frame, after native preparation and before sky/world draws.</summary>
@@ -11,7 +13,11 @@ internal sealed class AtmosphereRenderer : IRenderer
 {
     private readonly ICoreClientAPI _api;
     internal const int FrameFloatCount = 120; // Existing ABI plus an aligned fog/shelter/LOD vec4.
-    private readonly float[] _frame = new float[FrameFloatCount], _inverseView = new float[16], _inverseProjection = new float[16];
+
+    private readonly float[] _frame = new float[FrameFloatCount],
+        _inverseView = new float[16],
+        _inverseProjection = new float[16];
+
     private readonly double[] _sunGridInverseView = new double[16];
     private readonly AtmosphereComputeState _state = new();
     private readonly AtmosphereSkyResources _sky;
@@ -51,7 +57,10 @@ internal sealed class AtmosphereRenderer : IRenderer
     private bool Reload()
     {
         _bindings.Reload();
-        _pending = true; _skyAvailable = _volumeAvailable = false; _failureLogged = false; _worldFogProgram = 0;
+        _pending = true;
+        _skyAvailable = _volumeAvailable = false;
+        _failureLogged = false;
+        _worldFogProgram = 0;
         _ambientAvailable = false;
         _sheyder.ReplacementReady = false;
         FogAndLightAssetBridge.Apply(_api);
@@ -65,6 +74,7 @@ internal sealed class AtmosphereRenderer : IRenderer
     }
 
     private static float Nonnegative(float value) => float.IsFinite(value) ? Math.Max(value, 0f) : 0f;
+
     private float Uniform(int program, int location)
     {
         if (location < 0) return 0f;
@@ -77,26 +87,42 @@ internal sealed class AtmosphereRenderer : IRenderer
         var ambient = _api.Ambient;
         AmbientSkyInputs.Capture(ambient, _frame);
         var fog = ambient.BlendedFogColor;
-        _frame[0] = Nonnegative(fog[0]); _frame[1] = Nonnegative(fog[1]); _frame[2] = Nonnegative(fog[2]); _frame[3] = 1f;
-        _frame[4] = Nonnegative(ambient.BlendedFogDensity); _frame[5] = Math.Clamp(ambient.BlendedFogMin, 0f, 1f);
-        _frame[6] = ambient.BlendedFlatFogDensity; _frame[7] = ambient.BlendedFlatFogYPosForShader;
+        _frame[0] = Nonnegative(fog[0]);
+        _frame[1] = Nonnegative(fog[1]);
+        _frame[2] = Nonnegative(fog[2]);
+        _frame[3] = 1f;
+        _frame[4] = Nonnegative(ambient.BlendedFogDensity);
+        _frame[5] = Math.Clamp(ambient.BlendedFogMin, 0f, 1f);
+        _frame[6] = ambient.BlendedFlatFogDensity;
+        _frame[7] = ambient.BlendedFlatFogYPosForShader;
         int desired = _api.Settings.Int.Get("viewDistance", 512);
         var data = _api.World.Player.WorldData;
         int approved = data.LastApprovedViewDistance;
         _frame[8] = desired > 0 && approved > 0 ? Math.Min(desired, approved) : Math.Max(desired, approved);
         _fogEnvironment.Capture(_api, _frame, _lodFogRange.Endpoint);
         _frame[9] = 200f;
-        _frame[10] = _api.World is ClientMain client && client.playerProperties != null && client.playerProperties.EyesInWaterDepth >= 0.1f ? 1f : 0f;
+        _frame[10] = _api.World is ClientMain client && client.playerProperties != null &&
+                     client.playerProperties.EyesInWaterDepth >= 0.1f
+            ? 1f
+            : 0f;
         CaptureAir();
         var calendar = _api.World.Calendar;
-        var sun = calendar.SunPositionNormalized; var moon = calendar.MoonPosition;
+        var sun = calendar.SunPositionNormalized;
+        var moon = calendar.MoonPosition;
         _profile.Capture(calendar.SunsetMod, sun.Y, ambient.BlendedCloudDensity, deltaTime, _frame);
         float moonLength = (float)Math.Sqrt(moon.X * moon.X + moon.Y * moon.Y + moon.Z * moon.Z);
-        _frame[12] = sun.X; _frame[13] = sun.Y; _frame[14] = sun.Z; _frame[15] = Nonnegative(calendar.SunLightStrength);
-        _frame[16] = moon.X / Math.Max(moonLength, 0.00001f); _frame[17] = moon.Y / Math.Max(moonLength, 0.00001f);
-        _frame[18] = moon.Z / Math.Max(moonLength, 0.00001f); _frame[19] = Nonnegative(calendar.MoonLightStrength);
+        _frame[12] = sun.X;
+        _frame[13] = sun.Y;
+        _frame[14] = sun.Z;
+        _frame[15] = Nonnegative(calendar.SunLightStrength);
+        _frame[16] = moon.X / Math.Max(moonLength, 0.00001f);
+        _frame[17] = moon.Y / Math.Max(moonLength, 0.00001f);
+        _frame[18] = moon.Z / Math.Max(moonLength, 0.00001f);
+        _frame[19] = Nonnegative(calendar.MoonLightStrength);
         Mat4f.Invert(_inverseView, _api.Render.CameraMatrixOriginf);
-        _frame[20] = _inverseView[12]; _frame[21] = _inverseView[13]; _frame[22] = _inverseView[14];
+        _frame[20] = _inverseView[12];
+        _frame[21] = _inverseView[13];
+        _frame[22] = _inverseView[14];
         _frame[23] = (float)(_api.World.Player.Entity.CameraPos.Y - _api.World.SeaLevel);
         // Reuse the existing frame flag; disabling the look also skips camera-phase work.
         _frame[115] = 0f;
@@ -106,9 +132,10 @@ internal sealed class AtmosphereRenderer : IRenderer
             // receivers share the existing UBO; no per-draw camera/grid uploads.
             Mat4d.Invert(_sunGridInverseView, gridWorld.CurrentModelViewMatrixd);
             for (int i = 0; i < 3; ++i)
-                _frame[112+i] = (float)(_sunGridInverseView[12+i] - Math.Floor(_sunGridInverseView[12+i]));
+                _frame[112 + i] = (float)(_sunGridInverseView[12 + i] - Math.Floor(_sunGridInverseView[12 + i]));
             _frame[115] = 1f;
         }
+
         _frame[26] = Math.Max(1f, _frame[8]);
         var buffers = _api.Render.FrameBuffers;
         // Scene fragments use primary-target pixels. Window dimensions apply
@@ -117,7 +144,9 @@ internal sealed class AtmosphereRenderer : IRenderer
         _frame[32] = primary is { Disposed: false, Width: > 0 } ? primary.Width : _api.Render.FrameWidth;
         _frame[33] = primary is { Disposed: false, Height: > 0 } ? primary.Height : _api.Render.FrameHeight;
         _frame[35] = buffers != null && buffers.Count > 5 && buffers[5] != null &&
-            !buffers[5].Disposed && buffers[5].DepthTextureId > 0 ? 1f : 0f;
+                     !buffers[5].Disposed && buffers[5].DepthTextureId > 0
+            ? 1f
+            : 0f;
         Mat4f.Invert(_inverseProjection, _api.Render.CurrentProjectionMatrix);
         Array.Copy(_inverseProjection, 0, _frame, 36, 16);
         Array.Copy(_inverseView, 0, _frame, 52, 16);
@@ -130,11 +159,16 @@ internal sealed class AtmosphereRenderer : IRenderer
             if (_worldFogProgram != program)
             {
                 _worldFogProgram = program;
-                _wfDensity = GL.GetUniformLocation(program, "wf_Density"); _wfIntensity = GL.GetUniformLocation(program, "wf_Intensity");
-                _wfStart = GL.GetUniformLocation(program, "wf_FadeStart"); _wfFalloff = GL.GetUniformLocation(program, "wf_FallOff");
+                _wfDensity = GL.GetUniformLocation(program, "wf_Density");
+                _wfIntensity = GL.GetUniformLocation(program, "wf_Intensity");
+                _wfStart = GL.GetUniformLocation(program, "wf_FadeStart");
+                _wfFalloff = GL.GetUniformLocation(program, "wf_FallOff");
             }
-            _frame[28] = Uniform(program, _wfDensity); _frame[29] = Uniform(program, _wfIntensity);
-            _frame[30] = Uniform(program, _wfStart); _frame[31] = Uniform(program, _wfFalloff);
+
+            _frame[28] = Uniform(program, _wfDensity);
+            _frame[29] = Uniform(program, _wfIntensity);
+            _frame[30] = Uniform(program, _wfStart);
+            _frame[31] = Uniform(program, _wfFalloff);
         }
     }
 
@@ -146,7 +180,8 @@ internal sealed class AtmosphereRenderer : IRenderer
             // A dry snapshot prevents the native submerged density/color from
             // also being applied to the air segment beyond a known water exit.
             Array.Copy(_frame, 0, _frame, 68, 8);
-            _airCameraY = cameraY; _airCaptured = true;
+            _airCameraY = cameraY;
+            _airCaptured = true;
         }
         else if (!_airCaptured)
         {
@@ -160,62 +195,135 @@ internal sealed class AtmosphereRenderer : IRenderer
             _frame[73] = Math.Clamp(ambient.FogMin.Value, 0f, 1f);
             _frame[74] = ambient.FlatFogDensity.Value;
             _frame[75] = ambient.FlatFogYPos.Value + _api.World.SeaLevel - (float)cameraY;
-            _airCameraY = cameraY; _airCaptured = true;
+            _airCameraY = cameraY;
+            _airCaptured = true;
         }
         else
         {
             // Plane coordinates remain camera-relative while swimming.
-            _frame[75] += (float)(_airCameraY - cameraY); _airCameraY = cameraY;
+            _frame[75] += (float)(_airCameraY - cameraY);
+            _airCameraY = cameraY;
         }
     }
 
     public void OnRenderFrame(float deltaTime, EnumRenderStage stage)
     {
         _bindings.Restore();
+        if (stage == EnumRenderStage.AfterFinalComposition || _api.World?.Player?.Entity == null)
+        {
+            // This callback only updates the world-enabled UBO flag. Preserve
+            // that binding alone; querying/restoring the compute image, pixel
+            // buffers and texture/sampler units here repeats work every frame.
+            var previous = GL.GetInteger(GetPName.UniformBufferBinding);
+            try
+            {
+                _frame[3] = 0f;
+                Upload();
+            }
+            finally
+            {
+                GL.BindBuffer(BufferTarget.UniformBuffer, previous);
+            }
+
+            return; // GUI/item previews do not receive world fog.
+        }
+
         _state.Capture();
         try
         {
-            if (stage == EnumRenderStage.AfterFinalComposition || _api.World?.Player?.Entity == null)
-            {
-                _frame[3] = 0f; Upload(); return; // GUI/item previews do not receive world fog.
-            }
             if (!ReferenceEquals(_world, _api.World))
-            { _world = _api.World; _sky.ResetWorld(); _profile.Reset(); _airCaptured = false; }
+            {
+                _world = _api.World;
+                _sky.ResetWorld();
+                _profile.Reset();
+                _airCaptured = false;
+            }
+
             Capture(deltaTime);
             if (_pending)
             {
                 _pending = false;
                 // Optional resource failures are independent. Retry only after
                 // reload, never every frame; analytical transport stays active.
-                try { _sky.Initialize(); _skyAvailable = true; }
-                catch (Exception ex) { _sky.Dispose(); _api.Logger.Error("[DRT AgX] Sky LUT fallback: " + ex); }
+                try
+                {
+                    _sky.Initialize();
+                    _skyAvailable = true;
+                }
+                catch (Exception ex)
+                {
+                    _sky.Dispose();
+                    _api.Logger.Error("[DRT AgX] Sky LUT fallback: " + ex);
+                }
+
                 // Keep Sheyder's authored march/settings and avoid a second
                 // shaft layer. Shared analytical weather/sky fog is unchanged.
                 if (!_sheyder.LegacyAvailable)
                 {
-                    try { _volume.Initialize(_api); _volumeAvailable = true; }
-                    catch (Exception ex) { _volume.Dispose(); _api.Logger.Error("[DRT AgX] Fog volume fallback: " + ex); }
+                    try
+                    {
+                        _volume.Initialize(_api);
+                        _volumeAvailable = true;
+                    }
+                    catch (Exception ex)
+                    {
+                        _volume.Dispose();
+                        _api.Logger.Error("[DRT AgX] Fog volume fallback: " + ex);
+                    }
                 }
-                try { _ambient.Initialize(_api); _ambientAvailable = true; }
-                catch (Exception ex) { _ambient.Dispose(); _api.Logger.Error("[DRT AgX] Sky ambient fallback: " + ex); }
+
+                try
+                {
+                    _ambient.Initialize(_api);
+                    _ambientAvailable = true;
+                }
+                catch (Exception ex)
+                {
+                    _ambient.Dispose();
+                    _api.Logger.Error("[DRT AgX] Sky ambient fallback: " + ex);
+                }
+
                 _bindings.Volume = _volume.Texture;
-                _api.Logger.Notification($"[DRT AgX] Unified atmospheric transport initialized (sky={_skyAvailable}, optional volume={_volumeAvailable}).");
+                _api.Logger.Notification(
+                    $"[DRT AgX] Unified atmospheric transport initialized (sky={_skyAvailable}, optional volume={_volumeAvailable}).");
             }
+
             if (_skyAvailable)
             {
-                try { _sky.Update(_frame, deltaTime); }
-                catch (Exception ex) { _skyAvailable = false; _sky.Dispose(); _api.Logger.Error("[DRT AgX] Sky update fallback: " + ex); }
+                try
+                {
+                    _sky.Update(_frame, deltaTime);
+                }
+                catch (Exception ex)
+                {
+                    _skyAvailable = false;
+                    _sky.Dispose();
+                    _api.Logger.Error("[DRT AgX] Sky update fallback: " + ex);
+                }
             }
-            _frame[11] = _sky.Blend; _frame[24] = _sky.Ready ? 1f : 0f; _frame[27] = _sky.Normalization;
+
+            _frame[11] = _sky.Blend;
+            _frame[24] = _sky.Ready ? 1f : 0f;
+            _frame[27] = _sky.Normalization;
             _frame[25] = 0f;
             if (_volumeAvailable)
             {
                 // Only the fallback compute consumes this intermediate frame.
                 // Healthy Sheyder needs the final upload below, once per frame.
                 Upload();
-                try { _volume.Render(_api, _frame, _buffer, _sheyder.Strength); }
-                catch (Exception ex) { _volumeAvailable = false; _volume.Dispose(); _bindings.Volume = 0; _api.Logger.Error("[DRT AgX] Shaft update fallback: " + ex); }
+                try
+                {
+                    _volume.Render(_api, _frame, _buffer, _sheyder.Strength);
+                }
+                catch (Exception ex)
+                {
+                    _volumeAvailable = false;
+                    _volume.Dispose();
+                    _bindings.Volume = 0;
+                    _api.Logger.Error("[DRT AgX] Shaft update fallback: " + ex);
+                }
             }
+
             // Only the compatibility fallback owns these volume/composite
             // gates. Healthy Sheyder shafts keep their native late pass.
             _frame[25] = _volume.Ready ? 1f : 0f;
@@ -225,19 +333,35 @@ internal sealed class AtmosphereRenderer : IRenderer
             // This must follow the last CPU upload: compute publishes only its aligned result vec4.
             if (_ambientAvailable && _sky.Ready)
             {
-                try { _ambient.Render(_sky, _buffer); }
+                try
+                {
+                    _ambient.Render(_sky, _buffer);
+                }
                 catch (Exception ex)
-                { _ambientAvailable = false; _ambient.Dispose(); _api.Logger.Error("[DRT AgX] Ambient update fallback: " + ex); }
+                {
+                    _ambientAvailable = false;
+                    _ambient.Dispose();
+                    _api.Logger.Error("[DRT AgX] Ambient update fallback: " + ex);
+                }
             }
+
             _sheyder.ReplacementReady = _volumeAvailable;
         }
         catch (Exception ex)
         {
-            _frame[24] = _frame[25] = _frame[34] = 0f; Upload();
+            _frame[24] = _frame[25] = _frame[34] = 0f;
+            Upload();
             _sheyder.ReplacementReady = false;
-            if (!_failureLogged) { _api.Logger.Error("[DRT AgX] Atmosphere retained analytical/legacy fallback: " + ex); _failureLogged = true; }
+            if (!_failureLogged)
+            {
+                _api.Logger.Error("[DRT AgX] Atmosphere retained analytical/legacy fallback: " + ex);
+                _failureLogged = true;
+            }
         }
-        finally { _state.Dispose(); }
+        finally
+        {
+            _state.Dispose();
+        }
     }
 
     public void Dispose()
@@ -245,7 +369,11 @@ internal sealed class AtmosphereRenderer : IRenderer
         _api.Event.ReloadShader -= Reload;
         _api.Event.UnregisterRenderer(this, EnumRenderStage.Opaque);
         _api.Event.UnregisterRenderer(this, EnumRenderStage.AfterFinalComposition);
-        _bindings.Dispose(); _sheyder.Dispose(); _volume.Dispose(); _ambient.Dispose(); _sky.Dispose();
+        _bindings.Dispose();
+        _sheyder.Dispose();
+        _volume.Dispose();
+        _ambient.Dispose();
+        _sky.Dispose();
         GL.DeleteBuffer(_buffer);
     }
 }

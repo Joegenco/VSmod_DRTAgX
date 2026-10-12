@@ -11,191 +11,306 @@ namespace DRTAgX;
 /// hand, or six faces at one authored range for other omnidirectional lights.</summary>
 internal sealed class MovingLightShadowRenderer : IDisposable
 {
-    private const int BaseSize=192,MaxLights=10,TextureUnitNumber=15;
+    private const int BaseSize = 192, MaxLights = 10, TextureUnitNumber = 15;
+
     // Apply after quantization/capping so every render resolution is exactly
     // half the accepted overhaul size. Set to 1 to restore that size schedule.
-    internal const int ResolutionDivisor=2;
-    private const float FarRange=48f;
-    internal static readonly (float x,float y,float z,float ux,float uy,float uz)[] Directions =
-    { (1,0,0,0,-1,0),(-1,0,0,0,-1,0),(0,1,0,0,0,1),(0,-1,0,0,0,-1),(0,0,1,0,-1,0),(0,0,-1,0,-1,0) };
-    internal readonly TerrainCasterBatch Casters=new();
-    private readonly HeldProjectionFit _fit=new();
-    private readonly ShadowGlState _state=new(false);
-    private readonly int[] _slots=new int[16],_topIndices=new int[10],_handSources=new int[2],_kinds=new int[10];
-    private readonly float[] _topScores=new float[10],_sourceRanges=new float[16],_ranges=new float[10];
-    private readonly float[] _oldMvp=new float[16],_oldOrigin=new float[3],_oldCamera=new float[16];
-    private readonly float[] _scratchLightMatrix=new float[16],_scratchMeshMatrix=new float[16],_scratchViewMatrix=new float[16],_scratchProjMatrix=new float[16];
-    private readonly double[] _inverseWorldView=new double[16];
-    private readonly Vec3d _renderOrigin=new(),_lightWorld=new();
-    private int _depthAtlas,_framebuffer,_size,_capacity,_width,_height,_columns,_heldRows;
-    private int _previousTexture15,_previousSampler15;
-    private bool _pending,_warned;
+    internal const int ResolutionDivisor = 2;
+
+    internal static readonly (float x, float y, float z, float ux, float uy, float uz)[] Directions =
+    {
+        (1, 0, 0, 0, -1, 0), (-1, 0, 0, 0, -1, 0), (0, 1, 0, 0, 0, 1), (0, -1, 0, 0, 0, -1), (0, 0, 1, 0, -1, 0),
+        (0, 0, -1, 0, -1, 0)
+    };
+
+    internal readonly TerrainCasterBatch Casters = new();
+    private readonly PointTerrainShadowProgram _pointProgram = new("drtagx_moving_point_shadowmap");
+    private readonly MovingEntityShadowRenderer _entityShadows = new();
+    private readonly HeldProjectionFit _fit = new();
+    private readonly ShadowGlState _state = new(false);
+
+    private readonly int[] _slots = new int[16],
+        _topIndices = new int[10],
+        _handSources = new int[2],
+        _kinds = new int[10];
+
+    private readonly float[] _topScores = new float[10], _sourceRanges = new float[16], _ranges = new float[10];
+
+    private readonly float[] _scratchLightMatrix = new float[16],
+        _scratchMeshMatrix = new float[16],
+        _scratchViewMatrix = new float[16],
+        _scratchProjMatrix = new float[16];
+
+    private readonly double[] _inverseWorldView = new double[16];
+    private readonly Vec3d _renderOrigin = new(), _lightWorld = new();
+    private int _depthAtlas, _framebuffer, _size, _capacity, _width, _height, _columns, _heldRows;
+    private int _heldWidth, _heldHeight;
+    private int _previousTexture15, _previousSampler15;
+    private bool _pending, _warned;
     private IndexedBufferState _uniform5;
-    private int _shadowProgram,_mvp,_origin,_atlas,_heldIndex,_camera;
-    private int _deferredProgram,_countLocation,_mapLocation,_slotsLocation,_kindLocation,_rangesLocation,_atlasInfoLocation,_columnsLocation;
+    private int _shadowProgram, _mvp, _origin, _atlas, _heldIndex, _camera, _excludeWind;
+
+    private int _deferredProgram,
+        _countLocation,
+        _mapLocation,
+        _slotsLocation,
+        _kindLocation,
+        _rangesLocation,
+        _atlasInfoLocation,
+        _heldSizeLocation,
+        _columnsLocation;
+
     internal int Projections { get; private set; }
     internal int SkippedFaces { get; private set; }
     internal int DrawGroups { get; private set; }
-    internal double PrepareMilliseconds { get; private set; }
     internal int FaceResolution => _size;
 
-    internal static float Reach(float[] c)=>Math.Min(48f,MathF.Sqrt(c[0]*c[0]+c[1]*c[1]+c[2]*c[2]));
-    internal static float SelectionScore(float[] p,float[] c,MovingLightKind kind)
+    internal static float Reach(float[] c)
     {
-        float value=c[0]+c[1]+c[2];
-        if(kind is MovingLightKind.RightHand or MovingLightKind.LeftHand)
+        // Share the 16..32-block falloff with deferred lighting and caster
+        // culling. Empty or invalid emitters must not gain the minimum radius.
+        float range = MathF.Sqrt(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]);
+        return float.IsFinite(range) && range > 1e-6f ? Math.Clamp(range, 16f, 32f) : 0f;
+    }
+
+    internal static float SelectionScore(float[] p, float[] c, MovingLightKind kind)
+    {
+        float value = c[0] + c[1] + c[2];
+        if (kind is MovingLightKind.RightHand or MovingLightKind.LeftHand)
             return value;
-        return value/(1f+.15f*MathF.Sqrt(Dist2(p[0],p[1],p[2])));
+        return value / (1f + .15f * MathF.Sqrt(Dist2(p[0], p[1], p[2])));
     }
 
-    internal static bool Outranks(float score,MovingLightKind kind,float otherScore,MovingLightKind otherKind)
+    internal static bool Outranks(float score, MovingLightKind kind, float otherScore, MovingLightKind otherKind)
     {
-        bool held=kind is MovingLightKind.RightHand or MovingLightKind.LeftHand;
-        bool otherHeld=otherKind is MovingLightKind.RightHand or MovingLightKind.LeftHand;
-        if(held!=otherHeld)return held;
-        if(score!=otherScore)return score>otherScore;
-        return kind==MovingLightKind.RightHand&&otherKind==MovingLightKind.LeftHand;
+        bool held = kind is MovingLightKind.RightHand or MovingLightKind.LeftHand;
+        bool otherHeld = otherKind is MovingLightKind.RightHand or MovingLightKind.LeftHand;
+        if (held != otherHeld) return held;
+        if (score != otherScore) return score > otherScore;
+        return kind == MovingLightKind.RightHand && otherKind == MovingLightKind.LeftHand;
     }
 
-    internal bool Render(ICoreClientAPI api,float[][] positions,float[][] colors,int count,
-        int maxShadowLights,IShaderProgram deferred,MovingLightKind[] sourceKinds,bool firstPerson)
+    internal bool Render(ICoreClientAPI api, float[][] positions, float[][] colors, int count,
+        int maxShadowLights, IShaderProgram deferred, MovingLightKind[] sourceKinds, bool firstPerson)
     {
-        long start=Stopwatch.GetTimestamp();
-        PrepareMilliseconds=0;
-        Projections=SkippedFaces=DrawGroups=0;
-        Array.Fill(_slots,-1);Array.Fill(_topIndices,-1);Array.Fill(_handSources,-1);
-        Array.Clear(_topScores);Array.Clear(_kinds);Array.Clear(_ranges);
-        int capacity=Math.Clamp(maxShadowLights,1,MaxLights);
-        for(int i=0;i<count;++i)
+        Projections = SkippedFaces = DrawGroups = 0;
+        Array.Fill(_slots, -1);
+        Array.Fill(_topIndices, -1);
+        Array.Fill(_handSources, -1);
+        Array.Clear(_topScores);
+        Array.Clear(_kinds);
+        Array.Clear(_ranges);
+        int capacity = Math.Clamp(maxShadowLights, 1, MaxLights);
+        for (int i = 0; i < count; ++i)
         {
-            var p=positions[i];var c=colors[i];_sourceRanges[i]=Reach(c);
-            if(_sourceRanges[i]<=0)continue;
-            float score=SelectionScore(p,c,sourceKinds[i]);if(!float.IsFinite(score)||score<.02f)continue;
-            for(int rank=0;rank<capacity;++rank)
+            var p = positions[i];
+            var c = colors[i];
+            _sourceRanges[i] = Reach(c);
+            if (_sourceRanges[i] <= 0) continue;
+            float score = SelectionScore(p, c, sourceKinds[i]);
+            if (!float.IsFinite(score) || score < .02f) continue;
+            for (int rank = 0; rank < capacity; ++rank)
             {
-                if(_topIndices[rank]>=0 && !Outranks(score,sourceKinds[i],_topScores[rank],sourceKinds[_topIndices[rank]]))continue;
-                for(int n=capacity-1;n>rank;--n){_topIndices[n]=_topIndices[n-1];_topScores[n]=_topScores[n-1];}
-                _topIndices[rank]=i;_topScores[rank]=score;break;
+                if (_topIndices[rank] >= 0 &&
+                    !Outranks(score, sourceKinds[i], _topScores[rank], sourceKinds[_topIndices[rank]])) continue;
+                for (int n = capacity - 1; n > rank; --n)
+                {
+                    _topIndices[n] = _topIndices[n - 1];
+                    _topScores[n] = _topScores[n - 1];
+                }
+
+                _topIndices[rank] = i;
+                _topScores[rank] = score;
+                break;
             }
         }
-        int selected=0;
-        for(int rank=0;rank<capacity&&_topIndices[rank]>=0;++rank)
+
+        int selected = 0;
+        for (int rank = 0; rank < capacity && _topIndices[rank] >= 0; ++rank)
         {
-            int i=_topIndices[rank],slot=selected++;_slots[i]=slot;_ranges[slot]=_sourceRanges[i];
-            if(firstPerson&&sourceKinds[i] is MovingLightKind.RightHand or MovingLightKind.LeftHand)
+            int i = _topIndices[rank], slot = selected++;
+            _slots[i] = slot;
+            _ranges[slot] = _sourceRanges[i];
+            // Keep first-person hands on the single forward projector for
+            // performance, including forward-offset sources. Receivers behind
+            // the source retain the existing unshadowed visibility fallback.
+            if (firstPerson && sourceKinds[i] is MovingLightKind.RightHand or MovingLightKind.LeftHand)
             {
-                int h=sourceKinds[i]==MovingLightKind.RightHand?0:1;_handSources[h]=i;_kinds[slot]=h+1;
+                int h = sourceKinds[i] == MovingLightKind.RightHand ? 0 : 1;
+                _handSources[h] = i;
+                _kinds[slot] = h + 1;
             }
         }
-        if(selected==0||api.World is not ClientMain world||NativeShadowFields.Renderer(world) is not { } renderer||
-            NativeShadowFields.Passes(renderer) is not { Length: > 5 } passes||passes[0]==null||
-            NativeShadowFields.Atlases(renderer) is not { } atlases||
-            api.Render.GetEngineShader(EnumShaderProgram.Chunkshadowmap) is not { } shader||shader.Disposed||shader.LoadError||!Ensure(api,capacity))
-        {PushUniforms(deferred,0);return false;}
+
+        if (selected == 0 || api.World is not ClientMain world ||
+            NativeShadowFields.Renderer(world) is not { } renderer ||
+            NativeShadowFields.Passes(renderer) is not { Length: > 5 } passes || passes[0] == null ||
+            NativeShadowFields.Atlases(renderer) is not { } atlases ||
+            api.Render.GetEngineShader(EnumShaderProgram.Chunkshadowmap) is not { } shader || shader.Disposed ||
+            shader.LoadError || !Ensure(api, capacity))
+        {
+            PushUniforms(deferred, 0);
+            return false;
+        }
+
         // Resize failure can retain a smaller usable atlas. Never address a slot
         // outside that allocation; lighting for omitted slots remains unshadowed.
-        selected=Math.Min(selected,_capacity);
-        for(int i=0;i<count;++i)if(_slots[i]>=selected)_slots[i]=-1;
-        for(int h=0;h<2;++h)if(_handSources[h]>=0&&_slots[_handSources[h]]<0)_handSources[h]=-1;
+        selected = Math.Min(selected, _capacity);
+        for (int i = 0; i < count; ++i)
+            if (_slots[i] >= selected)
+                _slots[i] = -1;
+        for (int h = 0; h < 2; ++h)
+            if (_handSources[h] >= 0 && _slots[_handSources[h]] < 0)
+                _handSources[h] = -1;
         _state.Capture();
-        IShaderProgram? previous=api.Render.CurrentActiveShader;
-        int oldAtlas=0,oldHeld=0;bool uniformsCaptured=false;
+        IShaderProgram? previous = api.Render.CurrentActiveShader;
         try
         {
-            if(_shadowProgram!=shader.ProgramId)
+            // Compile the primitive gate only for point maps. The native sun
+            // program remains untouched, including its two-stage draw cost.
+            shader = _pointProgram.Get(api, shader) ??
+                     throw new InvalidOperationException("Moving-light point caster program unavailable.");
+            if (_shadowProgram != shader.ProgramId)
             {
-                _shadowProgram=shader.ProgramId;_mvp=GL.GetUniformLocation(_shadowProgram,"mvpMatrix");
-                _origin=GL.GetUniformLocation(_shadowProgram,"origin");_atlas=GL.GetUniformLocation(_shadowProgram,"tex2d");
-                _heldIndex=GL.GetUniformLocation(_shadowProgram,"drtHeldProjectionIndex");_camera=GL.GetUniformLocation(_shadowProgram,"drtHeldCameraMatrix");
+                _shadowProgram = shader.ProgramId;
+                _mvp = GL.GetUniformLocation(_shadowProgram, "mvpMatrix");
+                _origin = GL.GetUniformLocation(_shadowProgram, "origin");
+                _atlas = GL.GetUniformLocation(_shadowProgram, "tex2d");
+                _heldIndex = GL.GetUniformLocation(_shadowProgram, "drtHeldProjectionIndex");
+                _camera = GL.GetUniformLocation(_shadowProgram, "drtHeldCameraMatrix");
+                _excludeWind = GL.GetUniformLocation(_shadowProgram, "drtExcludeWindCasters");
             }
-            if(_mvp<0||_origin<0||_atlas<0||_heldIndex<0||_camera<0)throw new InvalidOperationException("Moving-light shadow shader interface unavailable.");
-            GL.GetUniform(shader.ProgramId,_mvp,_oldMvp);GL.GetUniform(shader.ProgramId,_origin,_oldOrigin);
-            GL.GetUniform(shader.ProgramId,_atlas,out oldAtlas);GL.GetUniform(shader.ProgramId,_heldIndex,out oldHeld);
-            GL.GetUniform(shader.ProgramId,_camera,_oldCamera);uniformsCaptured=true;
-            GetTerrainRenderOrigin(world.CurrentModelViewMatrixd,api.Render.CameraMatrixOriginf);
-            MovingLightGpuProfile.Total.BeginShadows(MovingLightGpuProfile.Enabled);
-            _fit.Fit(api,positions,_sourceRanges,_handSources,_size*6);
-            if(_fit.Buffer!=0)GL.BindBufferBase(BufferRangeTarget.UniformBuffer,5,_fit.Buffer);
-            GL.BindFramebuffer(FramebufferTarget.Framebuffer,_framebuffer);
-            GL.Enable(EnableCap.DepthTest);GL.DepthFunc(DepthFunction.Less);GL.DepthMask(true);
-            GL.Disable(EnableCap.Blend);GL.Disable(EnableCap.ScissorTest);GL.Disable(EnableCap.CullFace);GL.Disable(EnableCap.PolygonOffsetFill);
-            GL.ColorMask(false,false,false,false);
+
+            if (_mvp < 0 || _origin < 0 || _atlas < 0 || _heldIndex < 0 || _camera < 0 || _excludeWind < 0)
+                throw new InvalidOperationException("Moving-light shadow shader interface unavailable.");
+            // This program belongs exclusively to this moving-light renderer.
+            // Every consumed projection uniform is authored below, so reading
+            // and restoring its old values would only add driver round trips.
+            // The native program and shared GL bindings remain state-guarded.
+            GetTerrainRenderOrigin(world.CurrentModelViewMatrixd, api.Render.CameraMatrixOriginf);
+            // Prepare current native poses once, shared by all selected moving
+            // lights. Animated geometry never enters the static PLS cache.
+            _entityShadows.Prepare(api, positions, _slots, _sourceRanges, count, api.Render.CameraMatrixOriginf);
+            _fit.Fit(api, positions, _sourceRanges, _handSources, _heldWidth, _heldHeight);
+            if (_fit.Buffer != 0) GL.BindBufferBase(BufferRangeTarget.UniformBuffer, 5, _fit.Buffer);
+            GL.BindFramebuffer(FramebufferTarget.Framebuffer, _framebuffer);
+            GL.Enable(EnableCap.DepthTest);
+            GL.DepthFunc(DepthFunction.Less);
+            GL.DepthMask(true);
+            GL.Disable(EnableCap.Blend);
+            GL.Disable(EnableCap.ScissorTest);
+            GL.Disable(EnableCap.CullFace);
+            GL.Disable(EnableCap.PolygonOffsetFill);
+            GL.ColorMask(false, false, false, false);
             // One attachment, one clear. Gutters and skipped maps also get clear
             // depth, preventing stale shadows when sources or views change.
-            GL.ClearDepth(1.0);GL.Clear(ClearBufferMask.DepthBufferBit);
-            shader.Use();GL.Uniform1(_atlas,0);GL.Uniform1(_heldIndex,-1);
-            float[] camera=api.Render.CameraMatrixOriginf,projection=api.Render.CurrentProjectionMatrix;
-            GL.UniformMatrix4(_camera,1,false,camera);
-            Casters.Begin(passes,atlases);
-            PrepareMilliseconds=Stopwatch.GetElapsedTime(start).TotalMilliseconds;
-            int query=MovingLightGpuProfile.Render.Begin(MovingLightGpuProfile.Enabled);
+            GL.ClearDepth(1.0);
+            GL.Clear(ClearBufferMask.DepthBufferBit);
+            shader.Use();
+            GL.Uniform1(_atlas, 0);
+            GL.Uniform1(_heldIndex, -1);
+            GL.Uniform1(_excludeWind, 1);
+            float[] camera = api.Render.CameraMatrixOriginf, projection = api.Render.CurrentProjectionMatrix;
+            GL.UniformMatrix4(_camera, 1, false, camera);
+            Casters.Begin(passes, atlases);
             try
             {
-                for(int i=0;i<count;++i)
+                for (int i = 0; i < count; ++i)
                 {
-                    int slot=_slots[i];if(slot<0)continue;
-                    GetWorldLightPosition(positions[i]);float range=_ranges[slot]+.5f;
-                    Casters.Prepare(_renderOrigin,_lightWorld,range,camera);
-                    int stride=_size+8,sx=slot%_columns*2*stride,sy=slot/_columns*3*stride;
-                    if(_kinds[slot]>0)
+                    int slot = _slots[i];
+                    if (slot < 0) continue;
+                    GetWorldLightPosition(positions[i]);
+                    float range = _ranges[slot] + .5f;
+                    Casters.Prepare(_renderOrigin, _lightWorld, range, camera);
+                    int stride = _size + 8, sx = slot % _columns * 2 * stride, sy = slot / _columns * 3 * stride;
+                    if (_kinds[slot] > 0)
                     {
-                        // Hand projectors occupy a separate strip: triple their prior
-                        // 2*face resolution without enlarging any cube face.
-                        GL.Viewport(_columns*2*stride+4,slot*(_size*6+8)+4,_size*6,_size*6);GL.Uniform1(_heldIndex,_kinds[slot]-1);
+                        // Both hands use the same compact strip schedule as
+                        // fitting and sampling, with four-pixel atlas gutters.
+                        GL.Viewport(_columns * 2 * stride + 4, slot * (_heldHeight + 8) + 4,
+                            _heldWidth, _heldHeight);
+                        GL.Uniform1(_heldIndex, _kinds[slot] - 1);
                         // Empty GPU fits set clip.w=0 in the vertex shader. No
                         // fragment work or depth is produced, without readback.
-                        DrawGroups+=Casters.Draw(-1);Projections++;continue;
+                        DrawGroups += Casters.Draw(-1);
+                        DrawGroups += _entityShadows.Draw(api, shader, _kinds[slot] - 1, -1,
+                            camera, positions[i], range);
+                        Projections++;
+                        continue;
                     }
-                    GL.Uniform1(_heldIndex,-1);
-                    for(int face=0;face<6;++face)
+
+                    GL.Uniform1(_heldIndex, -1);
+                    for (int face = 0; face < 6; ++face)
                     {
-                        if(!FaceMayContribute(positions[i],face,range,projection)){SkippedFaces++;continue;}
-                        GL.Viewport(sx+(face%2)*stride+4,sy+(face/2)*stride+4,_size,_size);
-                        MakeLightMatrix(positions[i],Directions[face],range,_scratchViewMatrix,_scratchProjMatrix,_scratchLightMatrix);
-                        Multiply(_scratchLightMatrix,camera,_scratchMeshMatrix);GL.UniformMatrix4(_mvp,1,false,_scratchMeshMatrix);
-                        DrawGroups+=Casters.Draw(face);Projections++;
+                        if (!FaceMayContribute(positions[i], face, range, projection))
+                        {
+                            SkippedFaces++;
+                            continue;
+                        }
+
+                        GL.Viewport(sx + (face % 2) * stride + 4, sy + (face / 2) * stride + 4, _size, _size);
+                        MakeLightMatrix(positions[i], Directions[face], range, _scratchViewMatrix, _scratchProjMatrix,
+                            _scratchLightMatrix);
+                        Multiply(_scratchLightMatrix, camera, _scratchMeshMatrix);
+                        GL.UniformMatrix4(_mvp, 1, false, _scratchMeshMatrix);
+                        DrawGroups += Casters.Draw(face);
+                        DrawGroups += _entityShadows.Draw(api, shader, -1, face,
+                            _scratchMeshMatrix, positions[i], range);
+                        Projections++;
                     }
                 }
             }
-            finally{MovingLightGpuProfile.Render.End(query);Casters.End();}
+            finally
+            {
+                Casters.End();
+            }
         }
-        catch(Exception ex)
+        catch (Exception ex)
         {
-            if(!_warned){api.Logger.Warning("[DRT AgX] Moving-light shadows unavailable; retaining unshadowed lighting: {0}",ex.Message);_warned=true;}
-            selected=0;
+            if (!_warned)
+            {
+                api.Logger.Warning("[DRT AgX] Moving-light shadows unavailable; retaining unshadowed lighting: {0}",
+                    ex.Message);
+                _warned = true;
+            }
+
+            selected = 0;
         }
         finally
         {
-            if(uniformsCaptured)
-            {
-                GL.UseProgram(shader.ProgramId);
-                GL.UniformMatrix4(_mvp,1,false,_oldMvp);GL.Uniform3(_origin,_oldOrigin[0],_oldOrigin[1],_oldOrigin[2]);
-                GL.Uniform1(_atlas,oldAtlas);GL.Uniform1(_heldIndex,oldHeld);GL.UniformMatrix4(_camera,1,false,_oldCamera);
-            }
-            MovingLightGpuProfile.Total.EndShadows();
-            shader.Stop();previous?.Use();_state.Dispose();
+            _entityShadows.End();
+            shader.Stop();
+            previous?.Use();
+            _state.Dispose();
         }
-        PushUniforms(deferred,selected);return selected>0;
+
+        PushUniforms(deferred, selected);
+        return selected > 0;
     }
 
     // Legacy static callers retain their signature; source-level batches below
     // are shared by both renderers without changing the native terrain ABI.
-    private static float Dist2(float x,float y,float z)=>x*x+y*y+z*z;
-    private void GetTerrainRenderOrigin(double[] worldView,float[] originView)
+    private static float Dist2(float x, float y, float z) => x * x + y * y + z * z;
+
+    private void GetTerrainRenderOrigin(double[] worldView, float[] originView)
     {
-        Mat4d.Invert(_inverseWorldView,worldView);
-        double x=originView[12],y=originView[13],z=originView[14];
-        _renderOrigin.Set(_inverseWorldView[0]*x+_inverseWorldView[4]*y+_inverseWorldView[8]*z+_inverseWorldView[12],
-            _inverseWorldView[1]*x+_inverseWorldView[5]*y+_inverseWorldView[9]*z+_inverseWorldView[13],
-            _inverseWorldView[2]*x+_inverseWorldView[6]*y+_inverseWorldView[10]*z+_inverseWorldView[14]);
+        Mat4d.Invert(_inverseWorldView, worldView);
+        double x = originView[12], y = originView[13], z = originView[14];
+        _renderOrigin.Set(
+            _inverseWorldView[0] * x + _inverseWorldView[4] * y + _inverseWorldView[8] * z + _inverseWorldView[12],
+            _inverseWorldView[1] * x + _inverseWorldView[5] * y + _inverseWorldView[9] * z + _inverseWorldView[13],
+            _inverseWorldView[2] * x + _inverseWorldView[6] * y + _inverseWorldView[10] * z + _inverseWorldView[14]);
     }
+
     private void GetWorldLightPosition(float[] eye)
     {
-        double x=eye[0],y=eye[1],z=eye[2];
-        _lightWorld.Set(_inverseWorldView[0]*x+_inverseWorldView[4]*y+_inverseWorldView[8]*z+_inverseWorldView[12],
-            _inverseWorldView[1]*x+_inverseWorldView[5]*y+_inverseWorldView[9]*z+_inverseWorldView[13],
-            _inverseWorldView[2]*x+_inverseWorldView[6]*y+_inverseWorldView[10]*z+_inverseWorldView[14]);
+        double x = eye[0], y = eye[1], z = eye[2];
+        _lightWorld.Set(
+            _inverseWorldView[0] * x + _inverseWorldView[4] * y + _inverseWorldView[8] * z + _inverseWorldView[12],
+            _inverseWorldView[1] * x + _inverseWorldView[5] * y + _inverseWorldView[9] * z + _inverseWorldView[13],
+            _inverseWorldView[2] * x + _inverseWorldView[6] * y + _inverseWorldView[10] * z + _inverseWorldView[14]);
     }
+
     private static bool FaceMayContribute(float[] light, int face, float range, float[] projection)
     {
         // Only standard perspective matrices are eligible for this cull. The
@@ -215,18 +330,20 @@ internal sealed class MovingLightShadowRenderer : IDisposable
             bool outside = FacePlaneValue(-light[0], -light[1], -light[2], face, plane) < -1.5f;
             if (!outside) continue;
             for (int y = -1; y <= 1 && outside; y += 2)
-                for (int x = -1; x <= 1; x += 2)
+            for (int x = -1; x <= 1; x += 2)
+            {
+                float px = farDepth * (x + projection[8]) / projection[0] - light[0];
+                float py = farDepth * (y + projection[9]) / projection[5] - light[1];
+                if (FacePlaneValue(px, py, -farDepth - light[2], face, plane) >= -1.5f)
                 {
-                    float px = farDepth * (x + projection[8]) / projection[0] - light[0];
-                    float py = farDepth * (y + projection[9]) / projection[5] - light[1];
-                    if (FacePlaneValue(px, py, -farDepth - light[2], face, plane) >= -1.5f)
-                    {
-                        outside = false;
-                        break;
-                    }
+                    outside = false;
+                    break;
                 }
+            }
+
             if (outside) return false;
         }
+
         return true;
     }
 
@@ -251,43 +368,68 @@ internal sealed class MovingLightShadowRenderer : IDisposable
     {
         // Final presentation pixels determine shadow quality. Internal terrain
         // resolution/SSAA changes do not apply another scale to this budget.
-        return FaceSizeForDimensions(api.Render.FrameWidth,api.Render.FrameHeight);
+        return FaceSizeForDimensions(api.Render.FrameWidth, api.Render.FrameHeight);
     }
 
-    internal static int FaceSizeForDimensions(int width,int height)
+    internal static int FaceSizeForDimensions(int width, int height)
     {
-        if(width<=0||height<=0)return BaseSize/ResolutionDivisor;
+        if (width <= 0 || height <= 0) return BaseSize / ResolutionDivisor;
         // Linear map resolution follows sqrt(rendered pixel count), calibrated
         // to 192 cube pixels at 1080p before the reversible divisor. Held
-        // projectors use six times the resulting cube size. Sixteen-
+        // projectors have independent quarter-view dimensions. Sixteen-
         // pixel steps and 48..768 bounds are divided along with the map size.
-        double scale=Math.Sqrt((double)width*height/(1920.0*1080.0));
-        return Math.Clamp((int)Math.Ceiling(BaseSize*scale/16.0)*16,48,768)/ResolutionDivisor;
+        double scale = Math.Sqrt((double)width * height / (1920.0 * 1080.0));
+        return Math.Clamp((int)Math.Ceiling(BaseSize * scale / 16.0) * 16, 48, 768) / ResolutionDivisor;
     }
 
-    internal static void MakeLightMatrix(float[] eye, (float x, float y, float z, float ux, float uy, float uz) d, float far, float[] view, float[] proj, float[] result)
+    internal static void MakeLightMatrix(float[] eye, (float x, float y, float z, float ux, float uy, float uz) d,
+        float far, float[] view, float[] proj, float[] result)
     {
-        float rx = d.uy * d.z - d.uz * d.y, ry = d.uz * d.x - d.ux * d.z,
+        float rx = d.uy * d.z - d.uz * d.y,
+            ry = d.uz * d.x - d.ux * d.z,
             rz = d.ux * d.y - d.uy * d.x;
-        float ux = d.y * rz - d.z * ry, uy = d.z * rx - d.x * rz,
+        float ux = d.y * rz - d.z * ry,
+            uy = d.z * rx - d.x * rz,
             uz = d.x * ry - d.y * rx;
-        view[0] = rx; view[1] = ux; view[2] = -d.x; view[3] = 0f;
-        view[4] = ry; view[5] = uy; view[6] = -d.y; view[7] = 0f;
-        view[8] = rz; view[9] = uz; view[10] = -d.z; view[11] = 0f;
+        view[0] = rx;
+        view[1] = ux;
+        view[2] = -d.x;
+        view[3] = 0f;
+        view[4] = ry;
+        view[5] = uy;
+        view[6] = -d.y;
+        view[7] = 0f;
+        view[8] = rz;
+        view[9] = uz;
+        view[10] = -d.z;
+        view[11] = 0f;
         view[12] = -rx * eye[0] - ry * eye[1] - rz * eye[2];
         view[13] = -ux * eye[0] - uy * eye[1] - uz * eye[2];
         view[14] = d.x * eye[0] + d.y * eye[1] + d.z * eye[2];
         view[15] = 1f;
         const float near = 0.1f;
         float nf = near - far;
-        proj[0] = 0.94f; proj[1] = 0f; proj[2] = 0f; proj[3] = 0f;
-        proj[4] = 0f; proj[5] = 0.94f; proj[6] = 0f; proj[7] = 0f;
-        proj[8] = 0f; proj[9] = 0f; proj[10] = (far + near) / nf; proj[11] = -1f;
-        proj[12] = 0f; proj[13] = 0f; proj[14] = 2f * far * near / nf; proj[15] = 0f;
+        proj[0] = 0.94f;
+        proj[1] = 0f;
+        proj[2] = 0f;
+        proj[3] = 0f;
+        proj[4] = 0f;
+        proj[5] = 0.94f;
+        proj[6] = 0f;
+        proj[7] = 0f;
+        proj[8] = 0f;
+        proj[9] = 0f;
+        proj[10] = (far + near) / nf;
+        proj[11] = -1f;
+        proj[12] = 0f;
+        proj[13] = 0f;
+        proj[14] = 2f * far * near / nf;
+        proj[15] = 0f;
         Multiply(proj, view, result);
     }
 
-    internal static float[] MakeLightMatrix(float[] eye, (float x, float y, float z, float ux, float uy, float uz) d, float far)
+    internal static float[] MakeLightMatrix(float[] eye, (float x, float y, float z, float ux, float uy, float uz) d,
+        float far)
     {
         float[] view = new float[16];
         float[] proj = new float[16];
@@ -318,86 +460,185 @@ internal sealed class MovingLightShadowRenderer : IDisposable
         return result;
     }
 
-    private bool Ensure(ICoreClientAPI api,int capacity)
+    private bool Ensure(ICoreClientAPI api, int capacity)
     {
-        // Both cube faces and the six-times held projector use the same frame policy.
-        int size=FrameQuality.Current.MovingFace(GetFaceSize(api));
+        // Preserve the performance-mode reduction for both projection types.
+        int size = FrameQuality.Current.MovingFace(GetFaceSize(api));
         // Reserve high-resolution storage only for selected first-person hands;
         // dropped/API lights keep the compact cube-only allocation and clear.
-        int heldRows=(_handSources[0]>=0?1:0)+(_handSources[1]>=0?1:0);
-        if(_depthAtlas!=0&&_size==size&&_capacity==capacity&&_heldRows==heldRows)return true;
+        int heldRows = (_handSources[0] >= 0 ? 1 : 0) + (_handSources[1] >= 0 ? 1 : 0);
+        // Each axis is one quarter of the view, rounded up for partial pixels.
+        // Track both dimensions so aspect-only resizes also recreate the atlas.
+        int heldWidth = heldRows > 0
+            ? FrameQuality.Current.MovingFace(Math.Max(1, (api.Render.FrameWidth + 3) / 4))
+            : 0;
+        int heldHeight = heldRows > 0
+            ? FrameQuality.Current.MovingFace(Math.Max(1, (api.Render.FrameHeight + 3) / 4))
+            : 0;
+        if (_depthAtlas != 0 && _size == size && _capacity == capacity && _heldRows == heldRows &&
+            _heldWidth == heldWidth && _heldHeight == heldHeight) return true;
         ReleaseTextureBinding();
-        int restore=GL.GetInteger(GetPName.TextureBinding2D),draw=GL.GetInteger(GetPName.DrawFramebufferBinding),read=GL.GetInteger(GetPName.ReadFramebufferBinding);
-        int unpack=GL.GetInteger(GetPName.PixelUnpackBufferBinding);
-        int depth=0,fbo=0,columns=Math.Min(capacity,5),width=columns*2*(size+8)+(heldRows>0?size*6+8:0),
-            height=Math.Max(((capacity+columns-1)/columns)*3*(size+8),heldRows*(size*6+8));
+        int restore = GL.GetInteger(GetPName.TextureBinding2D),
+            draw = GL.GetInteger(GetPName.DrawFramebufferBinding),
+            read = GL.GetInteger(GetPName.ReadFramebufferBinding);
+        int unpack = GL.GetInteger(GetPName.PixelUnpackBufferBinding);
+        int depth = 0,
+            fbo = 0,
+            columns = Math.Min(capacity, 5),
+            width = columns * 2 * (size + 8) + (heldRows > 0 ? heldWidth + 8 : 0),
+            height = Math.Max(((capacity + columns - 1) / columns) * 3 * (size + 8),
+                heldRows * (heldHeight + 8));
         try
         {
             // A null pixel pointer means PBO offset zero when an unpack buffer
             // is bound. Atlas allocation supplies no pixels and must bind zero.
-            GL.BindBuffer(BufferTarget.PixelUnpackBuffer,0);
-            depth=GL.GenTexture();GL.BindTexture(TextureTarget.Texture2D,depth);
-            GL.TexImage2D(TextureTarget.Texture2D,0,PixelInternalFormat.DepthComponent24,width,height,0,PixelFormat.DepthComponent,PixelType.UnsignedInt,IntPtr.Zero);
-            GL.TexParameter(TextureTarget.Texture2D,TextureParameterName.TextureMinFilter,(int)TextureMinFilter.Linear);
-            GL.TexParameter(TextureTarget.Texture2D,TextureParameterName.TextureMagFilter,(int)TextureMagFilter.Linear);
-            GL.TexParameter(TextureTarget.Texture2D,TextureParameterName.TextureWrapS,(int)TextureWrapMode.ClampToEdge);
-            GL.TexParameter(TextureTarget.Texture2D,TextureParameterName.TextureWrapT,(int)TextureWrapMode.ClampToEdge);
-            GL.TexParameter(TextureTarget.Texture2D,TextureParameterName.TextureCompareMode,(int)TextureCompareMode.CompareRefToTexture);
-            GL.TexParameter(TextureTarget.Texture2D,TextureParameterName.TextureCompareFunc,(int)DepthFunction.Lequal);
-            fbo=GL.GenFramebuffer();GL.BindFramebuffer(FramebufferTarget.Framebuffer,fbo);
-            GL.FramebufferTexture2D(FramebufferTarget.Framebuffer,FramebufferAttachment.DepthAttachment,TextureTarget.Texture2D,depth,0);
-            GL.DrawBuffer(DrawBufferMode.None);GL.ReadBuffer(ReadBufferMode.None);
-            if(GL.CheckFramebufferStatus(FramebufferTarget.Framebuffer)!=FramebufferErrorCode.FramebufferComplete)throw new InvalidOperationException("Moving-light depth framebuffer incomplete.");
-            if(restore==_depthAtlas&&_depthAtlas!=0)restore=depth;
-            if(draw==_framebuffer&&_framebuffer!=0)draw=fbo;if(read==_framebuffer&&_framebuffer!=0)read=fbo;
-            if(_depthAtlas!=0)GL.DeleteTexture(_depthAtlas);if(_framebuffer!=0)GL.DeleteFramebuffer(_framebuffer);
-            _depthAtlas=depth;_framebuffer=fbo;_size=size;_capacity=capacity;_columns=columns;_width=width;_height=height;_heldRows=heldRows;
-            depth=fbo=0;return true;
+            GL.BindBuffer(BufferTarget.PixelUnpackBuffer, 0);
+            depth = GL.GenTexture();
+            GL.BindTexture(TextureTarget.Texture2D, depth);
+            GL.TexImage2D(TextureTarget.Texture2D, 0, PixelInternalFormat.DepthComponent24, width, height, 0,
+                PixelFormat.DepthComponent, PixelType.UnsignedInt, IntPtr.Zero);
+            GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter,
+                (int)TextureMinFilter.Linear);
+            GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter,
+                (int)TextureMagFilter.Linear);
+            GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS,
+                (int)TextureWrapMode.ClampToEdge);
+            GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT,
+                (int)TextureWrapMode.ClampToEdge);
+            GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureCompareMode,
+                (int)TextureCompareMode.CompareRefToTexture);
+            GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureCompareFunc,
+                (int)DepthFunction.Lequal);
+            fbo = GL.GenFramebuffer();
+            GL.BindFramebuffer(FramebufferTarget.Framebuffer, fbo);
+            GL.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.DepthAttachment,
+                TextureTarget.Texture2D, depth, 0);
+            GL.DrawBuffer(DrawBufferMode.None);
+            GL.ReadBuffer(ReadBufferMode.None);
+            if (GL.CheckFramebufferStatus(FramebufferTarget.Framebuffer) != FramebufferErrorCode.FramebufferComplete)
+                throw new InvalidOperationException("Moving-light depth framebuffer incomplete.");
+            if (restore == _depthAtlas && _depthAtlas != 0) restore = depth;
+            if (draw == _framebuffer && _framebuffer != 0) draw = fbo;
+            if (read == _framebuffer && _framebuffer != 0) read = fbo;
+            if (_depthAtlas != 0) GL.DeleteTexture(_depthAtlas);
+            if (_framebuffer != 0) GL.DeleteFramebuffer(_framebuffer);
+            _depthAtlas = depth;
+            _framebuffer = fbo;
+            _size = size;
+            _capacity = capacity;
+            _columns = columns;
+            _width = width;
+            _height = height;
+            _heldRows = heldRows;
+            _heldWidth = heldWidth;
+            _heldHeight = heldHeight;
+            depth = fbo = 0;
+            return true;
         }
-        catch(Exception ex){if(!_warned){api.Logger.Warning("[DRT AgX] Moving-light atlas allocation failed: {0}",ex.Message);_warned=true;}return _depthAtlas!=0&&_heldRows>=heldRows;}
+        catch (Exception ex)
+        {
+            if (!_warned)
+            {
+                api.Logger.Warning("[DRT AgX] Moving-light atlas allocation failed: {0}", ex.Message);
+                _warned = true;
+            }
+
+            return _depthAtlas != 0 && _heldRows >= heldRows;
+        }
         finally
         {
-            GL.BindFramebuffer(FramebufferTarget.DrawFramebuffer,draw);GL.BindFramebuffer(FramebufferTarget.ReadFramebuffer,read);
-            GL.BindTexture(TextureTarget.Texture2D,restore);
-            GL.BindBuffer(BufferTarget.PixelUnpackBuffer,unpack);
-            if(depth!=0)GL.DeleteTexture(depth);if(fbo!=0)GL.DeleteFramebuffer(fbo);
+            GL.BindFramebuffer(FramebufferTarget.DrawFramebuffer, draw);
+            GL.BindFramebuffer(FramebufferTarget.ReadFramebuffer, read);
+            GL.BindTexture(TextureTarget.Texture2D, restore);
+            GL.BindBuffer(BufferTarget.PixelUnpackBuffer, unpack);
+            if (depth != 0) GL.DeleteTexture(depth);
+            if (fbo != 0) GL.DeleteFramebuffer(fbo);
         }
     }
-    private void PushUniforms(IShaderProgram deferred,int count)
+
+    private void PushUniforms(IShaderProgram deferred, int count)
     {
-        ReleaseTextureBinding();int previous=GL.GetInteger(GetPName.CurrentProgram);GL.UseProgram(deferred.ProgramId);
-        if(_deferredProgram!=deferred.ProgramId)
+        ReleaseTextureBinding();
+        if (_deferredProgram != deferred.ProgramId)
         {
-            _deferredProgram=deferred.ProgramId;_countLocation=GL.GetUniformLocation(_deferredProgram,"drtShadowCount");
-            _mapLocation=GL.GetUniformLocation(_deferredProgram,"drtShadowMaps");_slotsLocation=GL.GetUniformLocation(_deferredProgram,"drtShadowSlot[0]");
-            _kindLocation=GL.GetUniformLocation(_deferredProgram,"drtShadowKind[0]");_rangesLocation=GL.GetUniformLocation(_deferredProgram,"drtShadowRange[0]");
-            _atlasInfoLocation=GL.GetUniformLocation(_deferredProgram,"drtMovingAtlasInfo");_columnsLocation=GL.GetUniformLocation(_deferredProgram,"drtMovingAtlasColumns");
+            _deferredProgram = deferred.ProgramId;
+            _countLocation = GL.GetUniformLocation(_deferredProgram, "drtShadowCount");
+            _mapLocation = GL.GetUniformLocation(_deferredProgram, "drtShadowMaps");
+            _slotsLocation = GL.GetUniformLocation(_deferredProgram, "drtShadowSlot[0]");
+            _kindLocation = GL.GetUniformLocation(_deferredProgram, "drtShadowKind[0]");
+            _rangesLocation = GL.GetUniformLocation(_deferredProgram, "drtShadowRange[0]");
+            _atlasInfoLocation = GL.GetUniformLocation(_deferredProgram, "drtMovingAtlasInfo");
+            _heldSizeLocation = GL.GetUniformLocation(_deferredProgram, "drtMovingHeldSize");
+            _columnsLocation = GL.GetUniformLocation(_deferredProgram, "drtMovingAtlasColumns");
         }
-        if(count==0)Array.Fill(_slots,-1);
-        GL.Uniform1(_countLocation,count);GL.Uniform1(_mapLocation,TextureUnitNumber);GL.Uniform1(_slotsLocation,16,_slots);
-        GL.Uniform1(_kindLocation,10,_kinds);GL.Uniform1(_rangesLocation,10,_ranges);
-        GL.Uniform4(_atlasInfoLocation,(float)_width,(float)_height,(float)_size,(float)(_size+8));GL.Uniform1(_columnsLocation,_columns);
-        if(count>0)
+
+        if (count == 0) Array.Fill(_slots, -1);
+        // Publish without rebinding the deferred program; only texture/UBO
+        // loans persist until the existing release-renderer boundary.
+        GL.ProgramUniform1(_deferredProgram, _countLocation, count);
+        GL.ProgramUniform1(_deferredProgram, _mapLocation, TextureUnitNumber);
+        GL.ProgramUniform1(_deferredProgram, _slotsLocation, 16, _slots);
+        GL.ProgramUniform1(_deferredProgram, _kindLocation, 10, _kinds);
+        GL.ProgramUniform1(_deferredProgram, _rangesLocation, 10, _ranges);
+        // Float locals select the vec4 overload rather than integer uniforms.
+        float width = _width, height = _height, faceSize = _size, stride = _size + 8;
+        GL.ProgramUniform4(_deferredProgram, _atlasInfoLocation, width, height, faceSize, stride);
+        // Publish actual allocated axes, including when a resize retains the old atlas.
+        float heldWidth = _heldWidth, heldHeight = _heldHeight;
+        GL.ProgramUniform2(_deferredProgram, _heldSizeLocation, heldWidth, heldHeight);
+        GL.ProgramUniform1(_deferredProgram, _columnsLocation, _columns);
+        if (count > 0)
         {
-            int active=GL.GetInteger(GetPName.ActiveTexture);GL.ActiveTexture(TextureUnit.Texture15);
-            _previousTexture15=GL.GetInteger(GetPName.TextureBinding2D);_previousSampler15=GL.GetInteger(GetPName.SamplerBinding);
-            _uniform5=IndexedBufferState.Capture(BufferRangeTarget.UniformBuffer,5);
-            GL.BindTexture(TextureTarget.Texture2D,_depthAtlas);GL.BindSampler(15,0);
-            int generic=GL.GetInteger(GetPName.UniformBufferBinding);
-            if(_fit.Buffer!=0)GL.BindBufferBase(BufferRangeTarget.UniformBuffer,5,_fit.Buffer);
-            GL.BindBuffer(BufferTarget.UniformBuffer,generic);
-            GL.ActiveTexture((TextureUnit)active);_pending=true;
+            int active = GL.GetInteger(GetPName.ActiveTexture);
+            GL.ActiveTexture(TextureUnit.Texture15);
+            _previousTexture15 = GL.GetInteger(GetPName.TextureBinding2D);
+            _previousSampler15 = GL.GetInteger(GetPName.SamplerBinding);
+            _uniform5 = IndexedBufferState.Capture(BufferRangeTarget.UniformBuffer, 5);
+            GL.BindTexture(TextureTarget.Texture2D, _depthAtlas);
+            GL.BindSampler(15, 0);
+            int generic = GL.GetInteger(GetPName.UniformBufferBinding);
+            if (_fit.Buffer != 0) GL.BindBufferBase(BufferRangeTarget.UniformBuffer, 5, _fit.Buffer);
+            GL.BindBuffer(BufferTarget.UniformBuffer, generic);
+            GL.ActiveTexture((TextureUnit)active);
+            _pending = true;
         }
-        GL.UseProgram(previous);
     }
-    internal void Disable(IShaderProgram deferred)=>PushUniforms(deferred,0);
+
+    internal void Disable(IShaderProgram deferred) => PushUniforms(deferred, 0);
+
     internal void ReleaseTextureBinding()
     {
-        if(!_pending)return;int active=GL.GetInteger(GetPName.ActiveTexture);GL.ActiveTexture(TextureUnit.Texture15);
-        GL.BindTexture(TextureTarget.Texture2D,_previousTexture15);GL.BindSampler(15,_previousSampler15);
-        int generic=GL.GetInteger(GetPName.UniformBufferBinding);_uniform5.Restore();GL.BindBuffer(BufferTarget.UniformBuffer,generic);
-        GL.ActiveTexture((TextureUnit)active);_pending=false;
+        if (!_pending) return;
+        int active = GL.GetInteger(GetPName.ActiveTexture);
+        GL.ActiveTexture(TextureUnit.Texture15);
+        GL.BindTexture(TextureTarget.Texture2D, _previousTexture15);
+        GL.BindSampler(15, _previousSampler15);
+        int generic = GL.GetInteger(GetPName.UniformBufferBinding);
+        _uniform5.Restore();
+        GL.BindBuffer(BufferTarget.UniformBuffer, generic);
+        GL.ActiveTexture((TextureUnit)active);
+        _pending = false;
     }
-    internal void Reload(){_shadowProgram=_deferredProgram=0;_fit.Reload();_warned=false;}
-    public void Dispose(){ReleaseTextureBinding();Casters.End();_fit.Dispose();if(_depthAtlas!=0)GL.DeleteTexture(_depthAtlas);if(_framebuffer!=0)GL.DeleteFramebuffer(_framebuffer);_depthAtlas=_framebuffer=_size=_capacity=0;}
+
+    internal void Reload()
+    {
+        _shadowProgram = _deferredProgram = 0;
+        _fit.Reload();
+        _pointProgram.Reload();
+        _entityShadows.Reload();
+        _warned = false;
+    }
+
+    public void Dispose()
+    {
+        ReleaseTextureBinding();
+        Casters.End();
+        _fit.Dispose();
+        _pointProgram.Dispose();
+        _entityShadows.Dispose();
+        if (_depthAtlas != 0) GL.DeleteTexture(_depthAtlas);
+        if (_framebuffer != 0) GL.DeleteFramebuffer(_framebuffer);
+        _depthAtlas = _framebuffer = _size = _capacity = 0;
+        _heldWidth = _heldHeight = 0;
+    }
 }

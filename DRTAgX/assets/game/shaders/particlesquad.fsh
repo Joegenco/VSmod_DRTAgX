@@ -14,6 +14,9 @@ in float extraWeight;
 
 uniform sampler2D particleTex;
 
+// Explicit vertex lighting publishes separate sun/local/emission components.
+// Shade decoded material directly instead of recovering light from prelit RGB.
+#define DRT_ALBEDO_SURFACE_LIGHTING
 #include fogandlight.fsh
 #include underwatereffects.fsh
 #include oit.fsh

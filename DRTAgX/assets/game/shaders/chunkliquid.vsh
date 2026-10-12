@@ -61,6 +61,10 @@ flat out int waterFlags;
 #include vertexflagbits.ash
 #include shadowcoords.vsh
 #define DRT_DYNAMIC_NORMAL_VIEW (modelViewMatrix * vec4(fragNormal, 0.0)).xyz
+// Match the fragment's raw-albedo mode; prelit fallback keeps the vertex floor.
+#if !defined(DRT_MEMO_LEGACY_DIAGNOSTIC) && !defined(DRT_PERFORMANCE_NO_PLS)
+#define DRT_FRAGMENT_NIGHTVISION_FLOOR
+#endif
 #include fogandlight.vsh
 #include vertexwarp.vsh
 #include colormap.vsh

@@ -114,7 +114,8 @@ void main(){
     float opaque = min(1.0, cloudOpaqueness * min(1.0, 10.0 * selfThickness)) * 2.0;
     opaque += undulatingModeness * 4.0;
     opaque *= alpha;
-    opaque *= smoothstep(0.95, 0.9, linearfade);
+    // Invert an increasing ramp; descending smoothstep edges are undefined in GLSL.
+    opaque *= 1.0 - smoothstep(0.9, 0.95, linearfade);
 
     // Retain native weather/tile shading; solar elevation supplies illumination below.
     float greyscale = (0.1 + cloudBrightness * 0.7)

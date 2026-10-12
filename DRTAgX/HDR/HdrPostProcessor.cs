@@ -8,7 +8,7 @@ namespace DRTAgX;
 
 /// <summary>
 /// Client render-thread post-processor managing the HDR bloom pyramid and auto-exposure adaptation pipeline.
-/// Executes immediately before native final composite, performing up to 5-level downsampling, separable Gaussian blurs,
+/// Executes immediately before native final composite, performing up to 5-level downsampling, progressive bloom reconstruction,
 /// weighted luminance metering, and exponential temporal exposure adaptation.
 /// </summary>
 internal sealed class HdrPostProcessor : IDisposable
@@ -16,8 +16,10 @@ internal sealed class HdrPostProcessor : IDisposable
     private readonly ICoreClientAPI _api;
     private readonly HdrMipResources _resources = new();
     private readonly HdrPassState _savedState = new(false);
-    private static readonly string[] LevelNames = { "level0", "level1", "level2", "level3", "level4" };
-    private ShaderProgram? _downsample, _blur, _combine, _adapt;
+    // Constant radiance retains the author's total bloom gain of .95 in either quality mode.
+    private static readonly float[] NormalWeights = { .05f, .30f, .30f, .20f, .10f };
+    private static readonly float[] PerformanceWeights = { .35f, .30f, .20f, .10f };
+    private ShaderProgram? _downsample, _upsample, _adapt;
     private int _triangleVao;
     private bool _warned;
     private bool _announced;
@@ -41,8 +43,7 @@ internal sealed class HdrPostProcessor : IDisposable
         DisposeShaders();
         bool okay = true;
         _downsample = Load("hdr_downsample", ref okay);
-        _blur = Load("hdr_blur", ref okay);
-        _combine = Load("hdr_combine", ref okay);
+        _upsample = Load("hdr_upsample", ref okay);
         _adapt = Load("hdr_adapt", ref okay);
         return okay;
     }
@@ -63,7 +64,7 @@ internal sealed class HdrPostProcessor : IDisposable
     {
         Ready = false;
         _bloomActive = config.BloomEnabled && config.BloomStrength > 0;
-        if (_downsample == null || _blur == null || _combine == null || _adapt == null) return;
+        if (_downsample == null || _upsample == null || _adapt == null) return;
         var buffers = _api.Render.FrameBuffers;
         object? player = _api.World?.Player?.Entity;
         if (player == null)
@@ -100,14 +101,13 @@ internal sealed class HdrPostProcessor : IDisposable
                 // attachment leaves the existing unboosted bloom path available.
                 int glowTexture = primary.ColorTextureIds.Length > 1 ? primary.ColorTextureIds[1] : 0;
                 // Exposure still needs luminance reduction when bloom is disabled.
-                // Skip blur/combine work entirely when the player turns off the glow.
+                // Skip reconstruction work entirely when the player turns off the glow.
                 if (_bloomActive || config.AutoExposureEnabled)
                     RenderPyramid(primary.ColorTextureIds[0], glowTexture,
                         primary.Width, primary.Height, config.AutoExposureEnabled);
                 if (_bloomActive)
                 {
-                    BlurPyramid();
-                    CombineBloom();
+                    ReconstructBloom();
                 }
                 if (config.AutoExposureEnabled) AdaptExposure(config, deltaTime);
                 else _resources.HasExposure = false;
@@ -161,6 +161,9 @@ internal sealed class HdrPostProcessor : IDisposable
             _downsample.Uniform("meterFirstLevel", i == 0 && meter && !separateMeter ? 1 : 0);
             _downsample.Uniform("reduction", i == 0 && performance ? 4 : 2);
             _downsample.Uniform("alignedHalf", sourceWidth == _resources.Width[i] * 2 && sourceHeight == _resources.Height[i] * 2 ? 1 : 0);
+            // Preserve level-zero extraction and metering exactly. Only the already
+            // extracted RGB levels receive the normalized wider low-pass filter.
+            _downsample.Uniform("wideFilter", i > 0 ? 1 : 0);
             GL.DrawArrays(PrimitiveType.Triangles, 0, 3);
             _downsample.Stop();
         }
@@ -175,44 +178,34 @@ internal sealed class HdrPostProcessor : IDisposable
             _downsample.Uniform("meterFirstLevel", 1);
             _downsample.Uniform("reduction", 2);
             _downsample.Uniform("alignedHalf", primaryWidth == _resources.MeterWidth * 2 && primaryHeight == _resources.MeterHeight * 2 ? 1 : 0);
+            _downsample.Uniform("wideFilter", 0);
             GL.DrawArrays(PrimitiveType.Triangles, 0, 3);
             _downsample.Stop();
         }
         if (meter) _resources.GenerateMeterMips();
     }
 
-    private void BlurPyramid()
+    private void ReconstructBloom()
     {
-        _blur!.Use();
-        for (int i = 0; i < _resources.ActiveLevels; i++)
+        float[] weights = FrameQuality.Current.Performance ? PerformanceWeights : NormalWeights;
+        int last = _resources.ActiveLevels - 1;
+        _upsample!.Use();
+        // Read the next coarser accumulation and write to a distinct scratch texture.
+        // No draw samples its attachment; the native scene and metering chain are untouched.
+        for (int i = last - 1; i >= 0; i--)
         {
-            float radius = 1f + (i + (FrameQuality.Current.Performance ? 1 : 0)) * 0.5f;
-            // The three-fetch Gaussian identity requires an aligned radius of exactly one texel.
-            _blur.Uniform("radiusOne", radius == 1f ? 1 : 0);
-            int w = _resources.Width[i], h = _resources.Height[i];
-            _resources.BindTarget(_resources.Scratch[i], w, h);
-            _blur.BindTexture2D("source", _resources.Scene[i], 0);
-            _blur.Uniform("blurStep", radius / w, 0f);
-            GL.DrawArrays(PrimitiveType.Triangles, 0, 3);
-            _resources.BindTarget(_resources.Scene[i], w, h);
-            _blur.BindTexture2D("source", _resources.Scratch[i], 0);
-            _blur.Uniform("blurStep", 0f, radius / h);
+            bool first = i == last - 1;
+            int lower = first ? _resources.Scene[last] : _resources.Scratch[i + 1];
+            _resources.BindTarget(i == 0 ? _resources.Bloom : _resources.Scratch[i],
+                _resources.Width[i], _resources.Height[i]);
+            _upsample.BindTexture2D("source", lower, 0);
+            _upsample.BindTexture2D("currentLevel", _resources.Scene[i], 1);
+            _upsample.Uniform("texelSize", 1f / _resources.Width[i + 1], 1f / _resources.Height[i + 1]);
+            _upsample.Uniform("levelWeight", weights[i]);
+            _upsample.Uniform("lowerWeight", first ? weights[last] : 1f);
             GL.DrawArrays(PrimitiveType.Triangles, 0, 3);
         }
-        _blur.Stop();
-    }
-
-    private void CombineBloom()
-    {
-        _resources.BindTarget(_resources.Bloom, _resources.Width[0], _resources.Height[0]);
-        _combine!.Use();
-        for (int i = 0; i < _resources.ActiveLevels; i++)
-            _combine.BindTexture2D(LevelNames[i], _resources.Scene[i], i);
-        // The fifth sampler retains a valid texture while its Performance weight is zero.
-        if (_resources.ActiveLevels == 4) _combine.BindTexture2D(LevelNames[4], _resources.Scene[3], 4);
-        _combine.Uniform("performanceMode", FrameQuality.Current.Performance ? 1 : 0);
-        GL.DrawArrays(PrimitiveType.Triangles, 0, 3);
-        _combine.Stop();
+        _upsample.Stop();
     }
 
     private void AdaptExposure(AgxConfig config, float deltaTime)
@@ -239,8 +232,7 @@ internal sealed class HdrPostProcessor : IDisposable
     private void DisposeShaders()
     {
         _downsample?.Dispose(); _downsample = null;
-        _blur?.Dispose(); _blur = null;
-        _combine?.Dispose(); _combine = null;
+        _upsample?.Dispose(); _upsample = null;
         _adapt?.Dispose(); _adapt = null;
     }
 

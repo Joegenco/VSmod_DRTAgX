@@ -1,82 +1,99 @@
-// SheyderMod: Volumetric fog - composite (included into the engine final pass).
-// Bilinearly upscales the half-resolution scatter buffer, applies a depth-aware (bilateral)
-// 3x3 tent blur to smooth away raymarch step structure, and adds the result to the
-// linear HDR scene before AgX. Native mip/bilateral/validity filtering is intact;
-// the display transform owns highlight compression. Gated off by vf_Enabled.
+// Sheyder volumetric fog: reject incompatible receivers BEFORE reconstructing
+// the half-resolution scatter. Mip/bilinear reads mix sky into terrain before
+// a depth test can remove it, so this pass reads individual level-zero texels.
+#include drtagx_fog_transport.ash
 
 uniform sampler2D vfScatterTex;
 uniform sampler2D vfDepthTex;
-uniform float     vf_Enabled = 0.0;
-
-// Blur radius in HALF-res texels (the scatter buffer's own grid), 0 = no blur taps at all.
-// This used to be a hard-coded 0.5, i.e. a quarter of a FULL-res texel - inside the bilinear
-// footprint the upscale already covers, so the blur did next to nothing. Values at or above 1
-// actually reach neighbouring scatter texels.
+// The existing atmosphere binder supplies the native liquid depth and validity.
+uniform sampler2D liquidDepth;
+uniform float vf_Enabled = 0.0;
 uniform float vf_BlurRadius = 5.0;
 
-const float VF_BLEED_REJECT = 50.0;
+float vf_receiverDepth(vec2 uv) {
+    ivec2 size = textureSize(vfDepthTex, 0);
+    ivec2 pixel = clamp(ivec2(floor(uv * vec2(size))), ivec2(0), size - 1);
+    float depth = texelFetch(vfDepthTex, pixel, 0).r;
+    if (drtAtmosphereScreen.w > 0.5) {
+        ivec2 liquidSize = textureSize(liquidDepth, 0);
+        ivec2 liquidPixel = clamp(ivec2(floor(uv * vec2(liquidSize))), ivec2(0), liquidSize - 1);
+        depth = min(depth, texelFetch(liquidDepth, liquidPixel, 0).r);
+    }
+    return depth;
+}
 
+float vf_linearDepth(float depth) {
+    // Positive camera-axis distance from the current projection. Hardware depth
+    // approaches one with distance and cannot distinguish distant walls/sky.
+    float clipZ = depth * 2.0 - 1.0;
+    float z = drtAtmosphereInvProjection[2][2] * clipZ + drtAtmosphereInvProjection[3][2];
+    float w = drtAtmosphereInvProjection[2][3] * clipZ + drtAtmosphereInvProjection[3][3];
+    return abs(z) / max(abs(w), 1e-8);
+}
 
-float vf_depthWeight(float sd, float cd) { return exp(-abs(sd - cd) * VF_BLEED_REJECT); }
+void vf_tap(inout vec3 acc, inout float totalWeight, ivec2 pixel,
+            ivec2 size, float centerDepth, bool centerSky, float spatialWeight) {
+    if (spatialWeight <= 0.0) return;
+    pixel = clamp(pixel, ivec2(0), size - 1);
+    vec4 scatter = texelFetch(vfScatterTex, pixel, 0);
+    if (scatter.a <= 0.0) return;
 
-// One blur tap. The kernel weight w0 is cut down by two rejections:
-//   * depth, so the shafts do not bleed across a near silhouette, and
-//   * the scatter buffer's own alpha, which is 0 only for invalid rays. Sky/cloud
-//     background rays now march the bounded shadow segment and carry alpha 1.
-//     Invalid texels must not dilute valid fog at a boundary; the depth term alone
-//     cannot catch this when non-linear depth puts far receivers close together.
-// The alpha rejection needs no threshold: the buffer is filtered, so a tap straddling the
-// boundary returns rgb already scaled by the valid fraction and alpha equal to that fraction.
-// Carrying the fraction in the WEIGHT (rather than testing it) therefore renormalises exactly,
-// and that stays true through the mip chain, which box-filters rgb and a together.
-void vf_tap(inout vec3 acc, inout float tw, vec2 uv, vec2 o, float cd, float w0, float lod) {
-    vec4  s  = textureLod(vfScatterTex, uv + o, lod);
-    float sd = texture(vfDepthTex, uv + o).r;
-    float w  = w0 * vf_depthWeight(sd, cd);
-    acc += s.rgb * w;
-    tw  += w * s.a;
+    // Exactly the UV of this scatter invocation, including odd framebuffer
+    // sizes. Scatter and composite both select floor(uv * depthTextureSize).
+    vec2 sampleUv = (vec2(pixel) + 0.5) / vec2(size);
+    float depth = vf_receiverDepth(sampleUv);
+    bool sampleSky = depth >= 1.0;
+    if (sampleSky != centerSky) return;
+
+    float weight = spatialWeight;
+    if (!centerSky) {
+        float sampleDepth = vf_linearDepth(depth);
+        float relativeDifference = abs(sampleDepth - centerDepth) /
+            max(min(sampleDepth, centerDepth), 0.1);
+        // Broad tolerance keeps sloped terrain smooth; reject distinct depth
+        // layers completely rather than retaining an exponential leakage tail.
+        weight *= 1.0 - smoothstep(0.05, 0.20, relativeDifference);
+    }
+    acc += scatter.rgb * weight;
+    totalWeight += scatter.a * weight;
 }
 
 vec3 vf_compositeVolumetric(vec3 sceneColor, vec2 uv) {
     if (vf_Enabled < 0.5) return sceneColor;
 
-    vec4 center = texture(vfScatterTex, uv);
+    float depth = vf_receiverDepth(uv);
+    bool centerSky = depth >= 1.0;
+    float centerDepth = centerSky ? 0.0 : vf_linearDepth(depth);
+    ivec2 size = textureSize(vfScatterTex, 0);
+    vec2 position = uv * vec2(size) - 0.5;
+    ivec2 base = ivec2(floor(position));
+    vec3 acc = vec3(0.0);
+    float totalWeight = 0.0;
 
-    if (center.a < 0.5) return sceneColor;
-
-    vec3 s = center.rgb;
-
-    if (vf_BlurRadius > 0.0) {
-        // 3x3 tent (centre 4, axial 2, diagonal 1) over the half-res grid, read from the scatter
-        // buffer's MIP CHAIN. Nine taps spaced vf_BlurRadius texels apart would leave gaps between
-        // them once the radius grows past ~2 - the result stops getting smoother and starts
-        // getting blotchy. Taking each tap at lod = log2(radius) makes it average a box the same
-        // size as the spacing, so the kernel stays gapless at any radius and the tap count never
-        // has to grow. Skipped entirely at radius 0 (uniform branch), which leaves the raw
-        // bilinear upscale.
-        float cd    = texture(vfDepthTex, uv).r;
-        vec2  texel = vf_BlurRadius / vec2(textureSize(vfScatterTex, 0));
-        float lod   = log2(max(vf_BlurRadius, 1.0));
-
-        vec3  acc = vec3(0.0);
-        float tw  = 0.0;
-
-        vf_tap(acc, tw, uv, vec2(0.0, 0.0), cd, 4.0, lod);
-        vf_tap(acc, tw, uv, vec2( texel.x, 0.0), cd, 2.0, lod);
-        vf_tap(acc, tw, uv, vec2(-texel.x, 0.0), cd, 2.0, lod);
-        vf_tap(acc, tw, uv, vec2(0.0,  texel.y), cd, 2.0, lod);
-        vf_tap(acc, tw, uv, vec2(0.0, -texel.y), cd, 2.0, lod);
-        vf_tap(acc, tw, uv, vec2( texel.x,  texel.y), cd, 1.0, lod);
-        vf_tap(acc, tw, uv, vec2(-texel.x,  texel.y), cd, 1.0, lod);
-        vf_tap(acc, tw, uv, vec2( texel.x, -texel.y), cd, 1.0, lod);
-        vf_tap(acc, tw, uv, vec2(-texel.x, -texel.y), cd, 1.0, lod);
-
-        // tw carries the summed VALID fraction, which right at a skyline can be small (the mip
-        // box is then mostly unmarched texels). acc shrinks with it, so the ratio stays the
-        // correct average of the valid samples; the guard only covers the all-invalid case.
-        s = acc / max(tw, 1e-4);
+    if (vf_BlurRadius <= 0.0) {
+        // Depth-aware bilinear upscale: four separate texels, rejected before
+        // interpolation. Smoothing zero must still protect terrain silhouettes.
+        vec2 f = fract(position);
+        vf_tap(acc, totalWeight, base, size, centerDepth, centerSky, (1.0 - f.x) * (1.0 - f.y));
+        vf_tap(acc, totalWeight, base + ivec2(1, 0), size, centerDepth, centerSky, f.x * (1.0 - f.y));
+        vf_tap(acc, totalWeight, base + ivec2(0, 1), size, centerDepth, centerSky, (1.0 - f.x) * f.y);
+        vf_tap(acc, totalWeight, base + ivec2(1, 1), size, centerDepth, centerSky, f.x * f.y);
+    } else {
+        // Continuous compact tent: support grows from one to two half-res
+        // texels. Cap smoothing above two to keep at most sixteen exact taps;
+        // broad mip footprints cannot preserve occlusion without more resources.
+        float radius = 1.0 + 0.5 * min(vf_BlurRadius, 2.0);
+        for (int y = -1; y <= 2; ++y) {
+            for (int x = -1; x <= 2; ++x) {
+                ivec2 pixel = base + ivec2(x, y);
+                vec2 tent = max(vec2(radius) - abs(vec2(pixel) - position), vec2(0.0));
+                vf_tap(acc, totalWeight, pixel, size, centerDepth, centerSky, tent.x * tent.y);
+            }
+        }
     }
 
-    // Preserve HDR radiance before AgX; its display transform owns highlights.
-    return sceneColor + s;
+    // A thin foreground feature may have no corresponding half-res ray. Do not
+    // fall back to a background ray and paint its fog over that occluder.
+    if (totalWeight <= 1e-6) return sceneColor;
+    return sceneColor + acc / totalWeight;
 }

@@ -45,8 +45,11 @@ out vec4 camPos;
 out float fragFrostAlpha;
 flat out int renderFlags;
 out float voxSunLight;
-
 out vec4 glPos;
+// Fragment USEOIT selects the translucent material pass; the native vertex
+// prefix does not carry that option. Keep draw-wide glow separate from faces.
+out vec3 drtAnimatedInheritedEmission;
+out float drtAnimatedInheritedGlow;
 
 out vec3 normal;
 #if SSAOLEVEL > 0
@@ -57,11 +60,14 @@ out vec4 gnormal;
 
 #include vertexflagbits.ash
 #include shadowcoords.vsh
-// Share placed-light falloff with terrain after the startup native compile.
+// Animated entities retain cheap unshadowed vertex lighting. They never sample
+// placed-light depth in their fragment stage, including the native OIT variant.
 #define DRT_FORWARD_PLACED_LIGHTS 1
-// Only animated entities shade their covered voxel/source blend by placed-light
-// direction. A normal facing away retains 10% of head-on local illumination.
+// Retain the existing animated material's authored facing response.
 #define DRT_ANIMATED_PLACED_FACING 1
+// Double directly light-facing local radiance, fading to the existing back-side
+// response. Shared point/placed loops reuse their existing normal/light dot.
+#define DRT_ANIMATED_POINT_FACING_GAIN 2.0
 #define DRT_DYNAMIC_NORMAL_VIEW (viewMatrix * vec4(normal, 0.0)).xyz
 #include fogandlight.vsh
 #include vertexwarp.vsh
@@ -100,11 +106,32 @@ void main(void)
 	vec4 cameraPos = camPos = viewMatrix * worldPos;
 
 	uv = uvIn;
-	int renderFlags = extraGlow + flags;
+	int lightingFlags = extraGlow + flags;
+	drtAnimatedInheritedEmission = vec3(0.0);
+	drtAnimatedInheritedGlow = 0.0;
+#ifdef DRT_EXPLICIT_SURFACE_LIGHTING
+    // Entity-wide glow (native locusts: 16/32) must not make opaque legs emit.
+    // Face-authored lamp/eye glow stays in ordinary lighting for every material.
+    // Saturation prevents extra glow carrying into geometry/normal flag bits.
+    int authoredGlow = flags & GlowLevelBitMask;
+    int fullGlow = authoredGlow + clamp(extraGlow, 0, GlowLevelBitMask);
+    fullGlow = min(fullGlow, GlowLevelBitMask);
+    lightingFlags = (flags & ~GlowLevelBitMask) | authoredGlow;
+    float inheritedGlow = float(fullGlow - authoredGlow) * 0.00390625;
+    drtAnimatedInheritedEmission = vec3(DRT_EMISSION_GAIN * inheritedGlow) * renderColor.rgb * colorIn.rgb;
+    drtAnimatedInheritedGlow = inheritedGlow / 2.5;
+#endif
 	// The animated model transform must rotate the normal before point-light shading.
 	normal = unpackNormal(renderFlags);
 	normal = (animModelMat * vec4(normal, 0.0)).xyz;
-	color = renderColor * colorIn * applyLight(rgbaAmbientIn, rgbaLightIn, renderFlags, cameraPos);
+	color = renderColor * colorIn * applyLight(rgbaAmbientIn, rgbaLightIn, lightingFlags, cameraPos);
+#ifdef DRT_EXPLICIT_SURFACE_LIGHTING
+    // Match the tint already carried by prelit color. Interpolating untinted
+    // components would repartition sunlight/local light incorrectly on models
+    // with varying vertex colors; coverage alpha stays entirely native.
+    drtSunLight *= renderColor.rgb * colorIn.rgb;
+    drtLocalLight *= renderColor.rgb * colorIn.rgb;
+#endif
 	rgbaFog = rgbaFogIn;
 	
 	// Distance fade out

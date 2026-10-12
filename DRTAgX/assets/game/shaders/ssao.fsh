@@ -40,7 +40,14 @@ void main()
 	}
 	
 	texVal = texture(gNormal, texcoord);
-	vec3 normal = normalize(texVal.xyz);
+	// Opaque custom/modded materials can omit their normal output too. An
+	// invalid receiver has no certified AO plane; preserve its visibility.
+	float normalLength2 = dot(texVal.xyz, texVal.xyz);
+	if (!(normalLength2 > 1e-12)) {
+		outOcclusion = vec4(1.0);
+		return;
+	}
+	vec3 normal = texVal.xyz * inversesqrt(normalLength2);
 	bool leavesHack = texVal.w > 0;
 	
 	// This seems to completely fix any distant ssao flickering artifacts while perservering everything else

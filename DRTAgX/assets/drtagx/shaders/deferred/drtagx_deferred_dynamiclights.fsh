@@ -8,32 +8,29 @@ void drtMovingFace(vec3 q,int face,out vec2 side,out float forward) {
     else{side=vec2(q.x,-q.y);forward=-q.z;}
 }
 float drtMovingPcf(vec3 shadow,vec2 gradient,int slot,int face,bool held) {
-    float size=drtMovingAtlasInfo.z*(held?6.0:1.0),stride=drtMovingAtlasInfo.w;
+    vec2 size=held?drtMovingHeldSize:vec2(drtMovingAtlasInfo.z);
+    float stride=drtMovingAtlasInfo.w;
     vec2 origin=vec2(slot%drtMovingAtlasColumns,slot/drtMovingAtlasColumns)*vec2(2,3)*stride+4.0;
     // Cube slots retain their six-face cells. Hand projectors use the
-    // appended high-resolution strip, with selected hand slots 0 and 1.
-    if(held)origin=vec2(float(drtMovingAtlasColumns)*2.0*stride+4.0,float(slot)*(size+8.0)+4.0);
+    // appended rectangular strip, with selected hand slots 0 and 1. Its row
+    // stride follows map height; PCF offsets use separate X/Y texel spacing.
+    if(held)origin=vec2(float(drtMovingAtlasColumns)*2.0*stride+4.0,float(slot)*(size.y+8.0)+4.0);
     else origin+=vec2(face%2,face/2)*stride;
-    vec2 texel=vec2(1.0/size),atlasSize=drtMovingAtlasInfo.xy;
+    vec2 texel=1.0/size,atlasSize=drtMovingAtlasInfo.xy;
     // Follow the receiving plane per tap, including the hardware bilinear footprint.
     // D24 precision margin is four depth-code steps. A large projected bias
     // would erase close blockers with the held projector's 5 mm near plane.
     float reference=shadow.z-dot(abs(gradient),texel)-0.00000024,visibility=0.0;
-    if(drtPerformanceMode != 0) {
-        // Four symmetric comparison footprints retain receiving-plane depth and the D24 margin.
-        for(int y=-1;y<=1;y+=2)for(int x=-1;x<=1;x+=2) {
-            vec2 uv=clamp(shadow.xy+vec2(x,y)*texel*0.8,texel,1.0-texel);
-            float depth=reference+dot(gradient,uv-shadow.xy);
-            visibility+=texture(drtShadowMaps,vec3((origin+uv*size)/atlasSize,depth));
-        }
-        return visibility*0.25;
-    }
-    for(int y=-1;y<=1;++y)for(int x=-1;x<=1;++x) {
-        vec2 uv=clamp(shadow.xy+vec2(x,y)*texel*1.6,texel,1.0-texel);
+    // Each hardware-linear comparison filters four adjacent depth texels. Four
+    // symmetric footprints give moving shadows a stable soft edge without the
+    // nine fetches formerly used outside performance mode. Keep the per-tap
+    // receiving-plane depth correction and the same four-code D24 margin.
+    for(int y=-1;y<=1;y+=2)for(int x=-1;x<=1;x+=2) {
+        vec2 uv=clamp(shadow.xy+vec2(x,y)*texel*0.8,texel,1.0-texel);
         float depth=reference+dot(gradient,uv-shadow.xy);
         visibility+=texture(drtShadowMaps,vec3((origin+uv*size)/atlasSize,depth));
     }
-    return visibility/9.0;
+    return visibility*0.25;
 }
 float drtMovingCubeFace(vec3 q,vec3 normal,float planeDistance,int slot,int face) {
     vec2 side,nside;float forward,nforward;
@@ -86,11 +83,13 @@ float drtMovingVisibility(vec3 receiver,vec3 emitter,int lightIndex,vec3 unitNor
     float secondary=drtMovingCubeFace(biased,unitNormal,planeDistance,slot,drtCubeFace(secondaryDirection));
     return mix(secondary,primary,0.5+0.5*smoothstep(0.0,major*0.03,major-runnerUp));
 }
+#ifdef DRT_DEFERRED_DEBUG
 // Debug interface; the lighting hot path below normalizes its normal once.
 float drtCurrentFrameVisibility(vec3 receiver,vec3 emitter,int index,vec3 normal) {
     float n2=dot(normal,normal);
     return drtMovingVisibility(receiver,emitter,index,n2>1e-6?normal*inversesqrt(n2):normalize(emitter-receiver));
 }
+#endif
 #define DRT_DYNAMIC_CAPACITY 16
 #include drtagx_dynamic_accumulation.ash
 // The default two-source case has only two ranks. Evaluate exactly the same
@@ -109,7 +108,7 @@ vec3 drtCurrentFrameLights(vec3 receiver,vec3 normalView) {
     for(int i=0;i<count;++i) {
         vec3 delta=drtPointPos[i]-receiver;float d2=dot(delta,delta),range=drtPointRadiance[i].w;
         vec3 c=vec3(0);
-        if(range>1e-6&&d2<range*range&&d2<=2304.0) {
+        if(range>1e-6&&d2<range*range&&d2<1024.0) {
             float d=sqrt(d2),w=max(0.0,1.0-d/range);
             float facing=n2>1e-6&&d2>1e-10?0.28+0.72*max(dot(normal,delta/d),0.0):1.0;
             vec3 shadowNormal=n2>1e-6?normal:(d2>1e-10?delta/d:vec3(0,1,0));

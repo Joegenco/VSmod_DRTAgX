@@ -13,12 +13,16 @@ internal sealed partial class StaticLightSources
             _unconfirmedRemovals.Remove(position);
             return true;
         }
-        if (!_byPosition.TryGetValue(position, out var previous)) return false;
+
         if (_failedQueries.Contains(position))
         {
-            source = previous;
+            RetryScan(key);
+            if (!_byPosition.TryGetValue(position, out var known)) return false;
+            source = known;
             return true;
         }
+
+        if (!_byPosition.TryGetValue(position, out var previous)) return false;
         // Async metadata can briefly report zero HSV while the loaded emitter
         // remains present. Confirm once in the next budgeted scan instead of
         // deleting a usable map and waiting for another chunk notification.
@@ -29,6 +33,7 @@ internal sealed partial class StaticLightSources
             source = previous;
             return true;
         }
+
         _unconfirmedRemovals.Remove(position);
         return false;
     }

@@ -44,6 +44,8 @@ out float normalShadeIntensity;
 #include vertexflagbits.ash
 #include shadowcoords.vsh
 #define DRT_DYNAMIC_NORMAL_VIEW (modelViewMatrix * vec4(normal, 0.0)).xyz
+// This pass shades raw albedo; apply the minimum after its fragment PLS handoff.
+#define DRT_FRAGMENT_NIGHTVISION_FLOOR
 #include fogandlight.vsh
 #include vertexwarp.vsh
 #include colormap.vsh
@@ -93,7 +95,17 @@ void main(void)
 	uv = uvIn;
  #endif
 
-	rgba = applyLight(rgbaAmbientIn, rgbaLightIn, renderFlags, cameraPos);
+	// Native glacierice and ice-glacier author glow=16 with zOffset=4.
+	// That cosmetic ice glow becomes real emission in the explicit compositor,
+	// leaving ice lit in a completely dark room. The terrain shader has no block
+	// ID; this exact static transparent flag pair identifies the native ice family.
+	// Mask only the lighting input: keep original flags for geometry/Z bias and
+	// leave material alpha, OIT revealage and ordinary glass lighting untouched.
+	int lightingFlags = renderFlags;
+	bool glacierIceGlow = (renderFlags & GlowLevelBitMask) == 16 &&
+		((renderFlags & ZOffsetBitMask) >> 8) == 4 && (renderFlags & WindModeBitMask) == 0;
+	if (glacierIceGlow) lightingFlags &= ~GlowLevelBitMask;
+	rgba = applyLight(rgbaAmbientIn, rgbaLightIn, lightingFlags, cameraPos);
 	// Evaluate atmospheric metadata after sunlight publication; glass in caves stays clear.
 	fogAmount = getFogLevel(worldPos, fogMinIn, fogDensityIn);
 	rgba.a = clamp(20 * (1.10 - length(worldPos.xz) / viewDistance) - 5 + max(0.0, worldPos.y * 0.02), -1.0, 1.0) - forcedTransparency;

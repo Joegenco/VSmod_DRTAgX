@@ -109,13 +109,21 @@ void main(void) {
     // color.rgb += color.rgb * Emissives.r * 0.5;
     // color.rgb += color.rgb * Emissives.g * 4.0;
 
-// Threshold-free HDR bloom is composited once, before exposure and AgX.
-#if BLOOM == 1
+// Owned bloom follows the DRTAgX setting even when native BLOOM is compiled
+// out. Overall HDR readiness stays distinct from the user's zero/disabled gain.
     if (drtBloomReady != 0 && drtBloomStrength > 0.0) {
         float bloomGain = 0.3 * (1.0 + max(ambientBloomLevel * 4.0, 0.0));
         color.rgb += texture(drtBloomTex, texCoord).rgb * bloomGain * drtBloomStrength;
         // Fade the matching native bloom contrast adjustment with the glow.
         color.rgb *= 1.0 - ambientBloomLevel * 0.25 * min(drtBloomStrength, 1.0);
+    }
+#if BLOOM == 1
+    else if (drtBloomReady == 0 && drtBloomStrength > 0.0) {
+        // Only an unavailable owned HDR pass falls back to the captured native
+        // bloom blend. Disabled DRTAgX bloom keeps strength zero in this branch.
+        vec3 nativeBloom = texture(bloomParts, texCoord).rgb;
+        float ambientLevel = max(ambientBloomLevel, 0.0) * 0.5 * drtBloomStrength;
+        color.rgb = (color.rgb + nativeBloom * (ambientLevel * 1.5)) / (1.0 + ambientLevel);
     }
 #endif
 
@@ -128,13 +136,15 @@ void main(void) {
     // OPTIMIZATION: Pre-calculate screen center length to avoid running length() 3 different times
     vec2 position = (gl_FragCoord.xy * invFrameSize.xy) - 0.5;
     float posLength = length(position);
-    float grayvignette = 1.0 - smoothstep(1.1, 0.3, posLength); 
+    // Ascending edges are required by GLSL. Reversed smoothstep happened to
+    // produce this same fade on one driver but its result is undefined.
+    float grayvignette = smoothstep(0.3, 1.1, posLength); 
     
     // OPTIMIZATION: Pre-calculate gl_FragCoord.xy / 20.0 to avoid repeating the division
     vec2 fc20 = gl_FragCoord.xy * 0.05;
     
     if (frostVignetting > 0.0) {
-        float str = -0.05 + 1.05 * clamp(1.0 - smoothstep(1.1 - frostVignetting * 0.25, 0.3, posLength), 0.0, 1.0) - grayvignette;
+        float str = -0.05 + 1.05 * smoothstep(0.3, 1.1 - frostVignetting * 0.25, posLength) - grayvignette;
         
         float wx = gnoise(vec3(fc20.x, str, gl_FragCoord.x * 0.0909 + gl_FragCoord.y * 0.1));
         float wy = gnoise(vec3(fc20.x, str, gl_FragCoord.x * 0.1 - gl_FragCoord.y * 0.1111));
@@ -152,7 +162,7 @@ void main(void) {
     }
     
     if (damageVignetting > 0.0) {
-        float str = clamp(1.0 - smoothstep(1.1 - damageVignetting * 0.25, 0.3, posLength), 0.0, 1.0) - grayvignette;
+        float str = smoothstep(0.3, 1.1 - damageVignetting * 0.25, posLength) - grayvignette;
         
         float g = gnoise(vec3(fc20.xy, 0.0)) + 0.5;
         g += gnoise(vec3(gl_FragCoord.xy * 0.2, 0.0)) * 0.2;

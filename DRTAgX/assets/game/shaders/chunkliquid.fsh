@@ -1,6 +1,17 @@
-#version 330 core
+#version 430 core
+#extension GL_ARB_gpu_shader5 : require
 #extension GL_ARB_shader_storage_buffer_object : require
 #extension GL_ARB_shading_language_420pack : require
+
+// Shipping PLS is memo-only; diagnostics may compile the legacy source loops.
+#ifndef DRT_MEMO_LEGACY_DIAGNOSTIC
+#define DRT_MEMO_ONLY
+#endif
+#if defined(DRT_MEMO_ONLY) && !defined(DRT_PERFORMANCE_NO_PLS)
+// texColor already holds the raw liquid material. Shade a unit albedo below
+// instead of prelit rgba, preserving new cached PLS channels at zero native light.
+#define DRT_ALBEDO_SURFACE_LIGHTING
+#endif
 
 // SheyderMod: vendored engine chunkliquid.fsh (water / lava pass) with mod hooks: analytic
 // entity/player water ripples (ripples.fsh) folded into the foam, and the atmospheric WorldFog
@@ -160,10 +171,15 @@ void main()
         rgbaFinal.a=1;
     }
 
+#ifdef DRT_ALBEDO_SURFACE_LIGHTING
+    vec3 surfaceLight = drtShadeSurface(vec3(1.0), shadowBright, vec3(1.0));
+#else
+    vec3 surfaceLight = drtShadeSurface(rgbaFinal.rgb, shadowBright, vec3(1.0));
+#endif
     if (isLava) {
-        texColor *= vec4(vec3(dot(drtShadeSurface(rgbaFinal.rgb, shadowBright, vec3(1.0)), vec3(1.0 / 3.0))), rgbaFinal.a);
+        texColor *= vec4(vec3(dot(surfaceLight, vec3(1.0 / 3.0))), rgbaFinal.a);
     } else {
-        texColor *= vec4(drtShadeSurface(rgbaFinal.rgb, shadowBright, vec3(1.0)), rgbaFinal.a);
+        texColor *= vec4(surfaceLight, rgbaFinal.a);
     }
     
     if (flowSpeed > 0) {
@@ -235,7 +251,7 @@ void main()
             }
             
             texColor.rgb += vec3(rgbAdd, rgbAdd, rgbAdd);
-            texColor.a += (max(0, diff/16 + noise/(12 - 8*min(1,windSpeed))) + vn / 4) / clamp(fresnel, 0.5, 1);
+            texColor.a += (max(0, diff/16 + noise/(12 - 8*min(1,windSpeed))) + vn / 4) / clamp(fresnel, 0.5, 1.0);
 
             // Droplet noise
             float f = 0;
@@ -249,7 +265,7 @@ void main()
             if (skyExposed > 0) {
             #endif
                 vec3 noisepos = vec3(localPos.x , localPos.z, waterWaveCounter / 8 + windWaveCounter / 6);
-                float dy = noise2 / 20 + clamp(gnoise(noisepos) / 10, 0, 0.6);
+                float dy = noise2 / 20 + clamp(gnoise(noisepos) / 10, 0.0, 0.6);
                 
                 vec3 normal = normalize(vec3(dy, 1, -dy));
                 float upness = max(0, dot(fragNormal, vec3(0,1,0)));

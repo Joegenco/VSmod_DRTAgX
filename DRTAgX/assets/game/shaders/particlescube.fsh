@@ -19,6 +19,7 @@ layout(location = 3) out vec4 outGPosition;
 #endif
 
 #define DRT_SURFACE_FOG_AFTER_LIGHTING
+#define DRT_ALBEDO_SURFACE_LIGHTING
 #include fogandlight.fsh
 #include underwatereffects.fsh
 

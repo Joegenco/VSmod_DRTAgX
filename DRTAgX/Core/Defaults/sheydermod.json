@@ -1,0 +1,122 @@
+{
+  "SubSurface": {
+    "Enabled": true,
+    "Strength": 0.9,
+    "SpotPower": 0.8,
+    "ConeMin": 0.62,
+    "ConeMinGrass": 0.45,
+    "SpotPowerGrass": 2.4,
+    "BloomScale": 8.0
+  },
+  "WorldFog": {
+    "Enabled": false,
+    "Density": 0.14,
+    "FadeStart": 0.0,
+    "FadeEnd": 620.0,
+    "Saturation": 1.0,
+    "SunScatter": 0.78
+  },
+  "LensFlare": {
+    "Enabled": true,
+    "Brightness": 1.0,
+    "StreakBrightness": 1.0,
+    "PointBrightness": 0.5,
+    "StreakLength": 0.15,
+    "TintCenter": {
+      "X": 1.0,
+      "Y": 0.7,
+      "Z": 0.35
+    },
+    "TintMid": {
+      "X": 0.3,
+      "Y": 0.85,
+      "Z": 0.4
+    },
+    "TintEdge": {
+      "X": 0.2,
+      "Y": 0.5,
+      "Z": 0.95
+    },
+    "ColorMid1": 1.0,
+    "ColorMid2": 0.75
+  },
+  "VolumetricFog": {
+    "Enabled": true,
+    "Intensity": 0.13,
+    "FogStart": 1.0,
+    "DistantFogDensity": 2.0,
+    "StepCount": 8,
+    "Smoothing": 2.2
+  },
+  "Specular": {
+    "Enabled": true,
+    "Strength": 0.95,
+    "BloomScale": 8.0
+  },
+  "Water": {
+    "Enabled": true,
+    "Strength": 1.0,
+    "Steps": 6,
+    "Downsample": 5,
+    "Distortion": 0.1,
+    "LandSaturation": 1.0,
+    "Grain": 0.15,
+    "Blur": 0.2,
+    "Taa": true,
+    "Cubemap": {
+      "Enabled": true,
+      "Resolution": 128,
+      "Strength": 0.4,
+      "MinDistance": 24.0,
+      "UpdateRate": 0.15
+    },
+    "Debug": false
+  },
+  "WaterRipples": {
+    "Enabled": true,
+    "Intensity": 0.6,
+    "BoatIntensity": 0.7,
+    "RaftIntensity": 0.75,
+    "Mode": "Both",
+    "FishIntensity": 1.0
+  },
+  "Bloom": {
+    "Enabled": false,
+    "Threshold": 1.0,
+    "Intensity": 3.0,
+    "Radius": 0.88
+  },
+  "Gtao": {
+    "Enabled": true,
+    "Intensity": 2.0,
+    "Radius": 0.8,
+    "Power": 0.5,
+    "FoliageBaseDamp": 0.0,
+    "FoliageIntensity": 1.6,
+    "Slices": 2,
+    "Steps": 4
+  },
+  "MechShadows": {
+    "Enabled": true
+  },
+  "Deferred": {
+    "Enabled": true,
+    "PerformanceMode": false,
+    "Debug": false
+  },
+  "BlockLight": {
+    "Enabled": true,
+    "Lanterns": true,
+    "LanternMode": 2,
+    "DirectionalSunlight": false,
+    "ShadowBrightness": 0.7,
+    "AmbientFloor": 0.07,
+    "RangeBlocks": 96
+  },
+  "Overexposure": {
+    "Enabled": true,
+    "Strength": 1.5,
+    "Warmth": 0.3,
+    "Glare": 0.0
+  }
+}

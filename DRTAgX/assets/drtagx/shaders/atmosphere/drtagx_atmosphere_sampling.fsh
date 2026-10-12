@@ -23,7 +23,11 @@ float drtStarVisibility() {
 
 vec2 drtSkyCoordinates(vec3 direction) {
     direction = normalize(direction);
-    return vec2(atan(direction.z, direction.x) / (2.0 * DRT_ATMOSPHERE_PI) + 0.5,
+    // At the poles every azimuth names the same direction. Pick the central
+    // column instead of passing atan(0,0), which GLSL leaves undefined.
+    float azimuth = abs(direction.x) + abs(direction.z) > 0.0
+        ? atan(direction.z, direction.x) : 0.0;
+    return vec2(azimuth / (2.0 * DRT_ATMOSPHERE_PI) + 0.5,
         asin(clamp(direction.y, -1.0, 1.0)) / DRT_ATMOSPHERE_PI + 0.5);
 }
 

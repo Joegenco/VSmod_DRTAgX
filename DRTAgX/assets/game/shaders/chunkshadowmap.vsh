@@ -37,9 +37,18 @@ layout(std140, binding = 5) uniform DrtHeldProjections {
 uniform float subpixelPaddingX;
 uniform float subpixelPaddingY;
 
+#ifdef DRT_POINT_SHADOWS
+// Only the owned point-shadow program adds a geometry gate. Native sun draws
+// keep their original two-stage interface and do not pay geometry-stage cost.
+out vec2 drtPointUv;
+out vec3 drtPointLocalPos;
+flat out int drtPointWindMode;
+flat out int drtPointWindCaster;
+#else
 out vec2 uv;
 out vec3 drtShadowLocalPos;
 flat out int drtShadowWindMode;
+#endif
 
 #include vertexflagbits.ash
 #include vertexwarp.vsh
@@ -64,7 +73,24 @@ void main(void)
     }
  #endif
 
-    drtShadowWindMode = (flags >> WindModePosition) & 15;
+    int windMode = (flags >> WindModePosition) & 15;
+#ifdef DRT_POINT_SHADOWS
+    // Liquid upper bits are a different ABI: lava alone is not wind geometry.
+    bool windCaster = liquidPass
+        ? ((waterFlagsIn & 1) != 0 || (waterFlagsIn & LiquidWeakWaveBitMask) != 0)
+        : windMode != 0;
+ #if USESSBO > 0
+    if (!liquidPass) {
+        // Packed quads may have stationary roots and animated tips. Exclude
+        // both triangles when any of the four authored corners animates.
+        windCaster = any(notEqual((vdata.flags >> WindModePosition) & ivec4(15), ivec4(0)));
+    }
+ #endif
+    drtPointWindMode = windMode;
+    drtPointWindCaster = windCaster ? 1 : 0;
+#else
+    drtShadowWindMode = windMode;
+#endif
 
 	vec4 worldPos = vec4(position + origin, 1.0);
     if (liquidPass && drtExcludeEmitter == 0) {
@@ -84,7 +110,11 @@ void main(void)
     }
 	// Light-relative position is stable at large world coordinates and lets
 	// the static atlas omit only the block that owns this light source.
+#ifdef DRT_POINT_SHADOWS
+    drtPointLocalPos = worldPos.xyz;
+#else
 	drtShadowLocalPos = worldPos.xyz;
+#endif
 	
 	gl_Position = mvpMatrix * worldPos;
 	if (drtHeldProjectionIndex >= 0) {
@@ -94,10 +124,15 @@ void main(void)
 	        : vec4(2.0, 2.0, 2.0, 1.0); // empty fit: no rasterization
 	}
 	
-    uv = uvIn;
+    vec2 shadowUv = uvIn;
  #if USESSBO > 0
-    if (!liquidPass) uv = UnpackUv(vdata, vIndex, subpixelPaddingX, subpixelPaddingY);
+    if (!liquidPass) shadowUv = UnpackUv(vdata, vIndex, subpixelPaddingX, subpixelPaddingY);
  #endif
+#ifdef DRT_POINT_SHADOWS
+    drtPointUv = shadowUv;
+#else
+    uv = shadowUv;
+#endif
 	
 	// We could use this to fix peter panninng on tall grass, but needs an extra render pass or extra vertex data for grass
 	//gl_Position.w += 1 * 0.00025 / max(0.1, gl_Position.z * 0.05);

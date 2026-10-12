@@ -4,7 +4,7 @@
 uniform int drtPointCount;
 uniform vec3 drtPointPos[16];
 uniform vec3 drtPointColor[16];
-uniform vec4 drtPointRadiance[16]; // normalized RGB and unchanged authored range
+uniform vec4 drtPointRadiance[16]; // normalized RGB and moving range clamped to 16..32 blocks
 uniform mat4 drtProjectionMatrix;
 uniform int drtShadowCount;
 // Shared style switch and double-camera fractional phase, also valid with sun shadows disabled.
@@ -17,6 +17,7 @@ uniform sampler2DShadow drtShadowMaps;
 uniform int drtShadowKind[10]; // 0 cube, 1 right hand, 2 left hand
 uniform float drtShadowRange[10];
 uniform vec4 drtMovingAtlasInfo; // width, height, face size, tile stride with gutters
+uniform vec2 drtMovingHeldSize; // rectangular hand-map width and height, excluding gutters
 uniform int drtMovingAtlasColumns;
 layout(std140, binding = 5) uniform DrtHeldProjections {
     mat4 drtHeldMatrices[2];
@@ -27,7 +28,6 @@ layout(std140, binding = 5) uniform DrtHeldProjections {
 layout(std430, binding = 4) readonly buffer DrtStaticSourceBuffer { vec4 drtStaticSourceData[]; };
 layout(std430, binding = 5) readonly buffer DrtStaticTileBuffer { uint drtStaticTileData[]; };
 uniform int drtStaticCount;
-uniform int drtStaticAllTerrainPasses = 0;
 uniform float drtStaticBlend;
 uniform int drtStaticTileWidth;
 uniform sampler2DArrayShadow drtStaticMaps;

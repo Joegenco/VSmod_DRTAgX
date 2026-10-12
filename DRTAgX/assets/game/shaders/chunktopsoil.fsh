@@ -1,6 +1,17 @@
-#version 330 core
+#version 430 core
+#extension GL_ARB_gpu_shader5 : require
 #extension GL_ARB_shader_storage_buffer_object : require
 #extension GL_ARB_shading_language_420pack : require
+
+// Keep legacy receiver loops only in explicit cache-off diagnostic builds.
+#ifndef DRT_MEMO_LEGACY_DIAGNOSTIC
+#define DRT_MEMO_ONLY
+#endif
+#if defined(DRT_MEMO_ONLY) && !defined(DRT_PERFORMANCE_NO_PLS)
+// Compose from the altered soil/grass albedo so cached PLS can light channels
+// absent from native vertex light. Legacy/no-PLS keeps the prelit ratio path.
+#define DRT_ALBEDO_SURFACE_LIGHTING
+#endif
 
 // SheyderMod: vendored engine chunktopsoil.fsh (soil / grass-overlay pass) with mod hooks:
 // the deferred G-buffer fill / relight path and the Specular highlight (compositing the dirt
@@ -46,8 +57,28 @@ layout(location = 3) out vec4 outGPosition;
 #endif
 
 #include vertexflagbits.ash
+#include drtagx_receiver_geometry.ash
+layout(location = 4) out int outReceiverPlane;
+layout(location = 5) out uvec2 outReceiverBounds;
+int drtFragmentReceiverPlane = DRT_RECEIVER_INVALID_PLANE;
+uint drtFragmentReceiverToken = 0u;
+#ifdef DRT_MEMO_ONLY
+#define DRT_DEFERRED_RECEIVER_ONLY
+#endif
 #define DRT_SURFACE_FOG_AFTER_LIGHTING
 #define DRT_TERRAIN_PLACED_OCCLUSION
+// Deferred relight owns cold fills; topsoil only reads when drawn forward.
+// A readonly SSBO avoids fragment side effects that obstruct early depth tests.
+bool drtMemoForwardReceiver = false;
+#define DRT_MEMO_READ_ONLY
+#define DRT_MEMO_FORWARD_RECEIVER drtMemoForwardReceiver
+#define DRT_MEMO_AUTHORED_NORMAL normal
+#if defined(DRT_MEMO_ONLY) && !defined(DRT_PERFORMANCE_NO_PLS) && SSAOLEVEL > 0
+// Topsoil owns the ordinary native token. Declare before the read-only helper
+// so forward replay consumes the same eligible identity as deferred relight.
+uint drtMemoSurfaceNormal = 0u;
+#define DRT_MEMO_NATIVE_TOKEN drtMemoSurfaceNormal
+#endif
 #include fogandlight.fsh
 #include colormap.fsh
 #include noise3d.ash
@@ -82,11 +113,17 @@ void sm_deferredFill(vec4 texColor, vec3 rawAlbedo)
     // Topsoil is solid terrain; +64 tags it as a dynamic-shadow caster.
     float encodedB = drtPackDeferredSun(drtVoxSunLight) + 64.0;
 
-    outColor = vec4(rawAlbedo * (drtVoxelLight + drtEmissionLight), rgbaFog.a);
+    outColor = vec4((drtDeferredIlluminationPayload != 0 ? vec3(1.0) : rawAlbedo) *
+        (drtVoxelLight + drtEmissionLight), rgbaFog.a);
+    outReceiverPlane = drtFragmentReceiverPlane;
+    outReceiverBounds = drtPackedReceiverBounds(drtFragmentReceiverPlane);
 #if SSAOLEVEL > 0
     // outGPosition.rgb carries unlit rawAlbedo (fixes faint striping where spatial coords were read as backlight color)
     outGPosition = vec4(rawAlbedo, fogAmount * 2.0 + glowLevel);
     outGNormal = gnormal;
+#if defined(DRT_MEMO_ONLY) && !defined(DRT_PERFORMANCE_NO_PLS)
+    outGNormal.w = drtPackPlacedSurfaceNormal(drtMemoSurfaceNormal);
+#endif
 #endif
     // The -4..-5 deferred-marker interval identifies topsoil as a receiver.
     outGlow = vec4(glowLevel, -(4.0 + specD), encodedB,
@@ -95,7 +132,14 @@ void sm_deferredFill(vec4 texColor, vec3 rawAlbedo)
 
 void main()
 {
+    outReceiverPlane = DRT_RECEIVER_INVALID_PLANE;
+    outReceiverBounds = uvec2(0xffffffffu);
+    drtFragmentReceiverPlane = drtValidatedReceiverPlane(drtFragmentReceiverToken);
+#if defined(DRT_MEMO_ONLY) && !defined(DRT_PERFORMANCE_NO_PLS) && SSAOLEVEL > 0
+    drtMemoSurfaceNormal = drtFragmentReceiverToken;
+#elif !defined(DRT_MEMO_ONLY)
     drtCaptureTerrainPlacedPlane(worldPos.xyz);
+#endif
     // Match the opaque base's fully concealed endpoint, preserving solid depth.
     drtDiscardTerrainBoundary(worldPos.xyz);
     vec4 rawBrownSoil   = texture(terrainTex, uv);
@@ -147,6 +191,7 @@ void main()
     // <<< SheyderMod
 
 
+    drtMemoForwardReceiver = true; // Only the native forward branch reaches here.
     drtPrepareTerrainPlacedVisibility(worldPos.xyz);
     outColor = texColor;
 
@@ -160,7 +205,11 @@ void main()
     ox_prepare(normal, 0.0);
     #endif
 
+#ifdef DRT_ALBEDO_SURFACE_LIGHTING
+    outColor = applyFogAndShadowWithNormal(vec4(rawAlbedo, outColor.a), fogAmount, normal, 1, intensity, worldPos.xyz);
+#else
     outColor = applyFogAndShadowWithNormal(outColor, fogAmount, normal, 1, intensity, worldPos.xyz);
+#endif
 
 
     // SheyderMod: bloom mask accumulator (Specular glint -> outGlow.b)

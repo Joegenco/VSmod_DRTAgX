@@ -22,11 +22,20 @@ namespace DRTAgX
                 if (targetShader.HasUniform("AgxMinEv")) targetShader.Uniform("AgxMinEv", config.AgxMinEv);
                 if (targetShader.HasUniform("AgxMaxEv")) targetShader.Uniform("AgxMaxEv", config.AgxMaxEv);
                 if (targetShader.HasUniform("GreyPoint")) targetShader.Uniform("GreyPoint", config.GreyPoint);
-                if (targetShader.HasUniform("INV_GREY_POINT")) targetShader.Uniform("INV_GREY_POINT", 1.0f / Math.Max(config.GreyPoint, 0.0001f));
+                if (targetShader.HasUniform("INV_GREY_POINT"))
+                    targetShader.Uniform("INV_GREY_POINT", 1.0f / Math.Max(config.GreyPoint, 0.0001f));
                 // Apply the configured exposure directly, independently of PLS.
                 if (targetShader.HasUniform("Exposure"))
                     targetShader.Uniform("Exposure", config.Exposure);
 
+                // Native gameplay strength drives the final scene tint and its
+                // fade. Publish every frame, independently of HDR readiness.
+                if (targetShader.HasUniform("drtNightVisionStrength"))
+                {
+                    var strength = api.Render.ShaderUniforms.NightVisionStrength;
+                    targetShader.Uniform("drtNightVisionStrength",
+                        float.IsFinite(strength) ? Math.Clamp(strength, 0f, 1f) : 0f);
+                }
             }
             finally
             {
@@ -34,10 +43,19 @@ namespace DRTAgX
                 // engine's managed shader and raw GL state, even if Stop fails.
                 try
                 {
-                    try { targetShader.Stop(); }
-                    finally { activeShader?.Use(); }
+                    try
+                    {
+                        targetShader.Stop();
+                    }
+                    finally
+                    {
+                        activeShader?.Use();
+                    }
                 }
-                finally { GL.UseProgram(previousProgram); }
+                finally
+                {
+                    GL.UseProgram(previousProgram);
+                }
             }
         }
     }

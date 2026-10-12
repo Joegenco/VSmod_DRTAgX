@@ -18,6 +18,7 @@ uniform float INV_GREY_POINT = 5.5555556;
 uniform float Exposure = 0.0;
 uniform sampler2D drtExposureTex;
 uniform int drtExposureEnabled = 0;
+uniform float drtNightVisionStrength = 0.0;
 
 const mat3 AgXInsetMatrix = mat3(
     0.842479, 0.042328, 0.042376,
@@ -38,11 +39,23 @@ vec3 ApplyAgX(vec3 color) {
     color.rgb = max(color.rgb, 0.0);
 
     color += (contrastLevel * 0.015);
+
+    // Apply night vision after exposure/grading controls, immediately before
+    // AgX's inset/log/curve transform. Native strength retains its smooth fade.
+    float nightVision = clamp(drtNightVisionStrength, 0.0, 1.0);
+    if (nightVision > 0.0) {
+        vec3 nightColor = vec3(0.01,
+            max(color.r - color.g * 0.1 - color.b * 0.33, 0.01), 0.01);
+        color = mix(color, nightColor, nightVision);
+    }
  
     color = AgXInsetMatrix * color;
-    color = clamp(log2(max(color, vec3(0.00005))), vec3(AgxMinEv), vec3(AgxMaxEv));
+    // Config loading validates these controls; also tolerate a collapsed range
+    // when a custom shader/uniform caller bypasses the normal configuration.
+    float maximumEv = max(AgxMaxEv, AgxMinEv + 0.0001);
+    color = clamp(log2(max(color, vec3(0.00005))), vec3(AgxMinEv), vec3(maximumEv));
     
-    color = (color - vec3(AgxMinEv)) / (AgxMaxEv - AgxMinEv);
+    color = (color - vec3(AgxMinEv)) / (maximumEv - AgxMinEv);
 	color += 0.055;
     color = clamp(color, 0.0003, 1.0);
     

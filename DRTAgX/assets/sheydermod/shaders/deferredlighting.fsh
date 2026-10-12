@@ -1,7 +1,12 @@
-#version 330 core
+#version 430 core
 #extension GL_ARB_gpu_shader5 : require
 #extension GL_ARB_shader_storage_buffer_object : require
 #extension GL_ARB_shading_language_420pack : require
+
+// Cache-off diagnostics explicitly retain the original per-receiver model.
+#ifndef DRT_MEMO_LEGACY_DIAGNOSTIC
+#define DRT_MEMO_ONLY
+#endif
 
 // SheyderMod: Deferred terrain lighting - fullscreen relight pass.
 // Runs once per screen pixel at the end of the opaque stage over the scratch G-buffer the
@@ -33,6 +38,8 @@ layout(location = 0) out vec4 outColor;
 layout(location = 1) out vec4 outGlow;
 
 layout(location = 3) out vec4 outGPosition;
+// Non-emissive diffuse irradiance; replay multiplies its own raw material once.
+layout(location = 4) out vec4 outDiffuseIrradiance;
 
 #define DRT_DEFERRED_LIGHTING
 #define DRT_SURFACE_FOG_AFTER_LIGHTING
@@ -48,8 +55,14 @@ layout(location = 3) out vec4 outGPosition;
 #include drtagx_deferred_dynamiclights.fsh
 #include drtagx_deferred_staticshadows.fsh
 #include drtagx_deferred_placedlights.fsh
+// Unsupported static receivers borrow the same completed depth/source snapshot.
+// Ordinary terrain still reads its cached pages without per-pixel shadow work.
+#define DRT_PLACED_RECEIVER_SHARED_DECLARATIONS
+#include drtagx_placed_receiver_fallback.ash
 #include drtagx_deferred_relighting.fsh
-#include drtagx_deferred_debug.fsh
+#ifdef DRT_DEFERRED_DEBUG
+
+#endif
 
 float deferredMurkiness(float terrainDepth)
 {
@@ -62,8 +75,29 @@ float deferredMurkiness(float terrainDepth)
 
 #include drtagx_deferred_directional.fsh
 
+bool drtAuthoredReceiverPosition(uint token, out vec3 receiverView) {
+    receiverView=vec3(0.0);
+    if(drtReceiverPlaneReady==0 || token==0u || token>=4096u)return false;
+    int plane=texelFetch(drtReceiverPlane,ivec2(gl_FragCoord.xy),0).r;
+    uvec2 bounds=texelFetch(drtReceiverBounds,ivec2(gl_FragCoord.xy),0).rg;
+    if(all(equal(bounds,uvec2(0xffffffffu))))return false;
+    if(plane==(-2147483647-1))return false;
+    vec3 n=drtPlacedSurfaceNormalVector(token);
+    vec4 ray=invProjectionMatrix*vec4(texcoord*2.0-1.0,1.0,1.0);
+    vec3 viewRay=ray.xyz/ray.w;
+    vec3 worldRay=mat3(invModelViewMatrix)*viewRay;
+    float denominator=dot(n,worldRay);
+    if(abs(denominator)<=1e-7*length(n)*length(worldRay))return false;
+    float t=(float(plane)/1024.0-dot(n,drtMemoCameraOffset))/denominator;
+    if(t<=0.0 || isnan(t) || isinf(t))return false;
+    // D24 continues to govern visibility, fog and native sun/moving lighting.
+    // Only PLS intersects this geometry-authored plane and uses its stable key.
+    receiverView=viewRay*t;drtAuthoredPlane=plane;drtAuthoredBounds=bounds;return true;
+}
+
 void main(void)
 {
+    outDiffuseIrradiance=vec4(0.0);
     vec4 color   = texture(gColor, texcoord);
     vec4 glowVec = texture(gGlow, texcoord);
 
@@ -126,18 +160,63 @@ void main(void)
     vec3  nrmWorld = (invModelViewMatrix * vec4(nrm4.xyz, 0.0)).xyz;
     float nrmLen2  = dot(nrmWorld, nrmWorld);
     vec3  normal   = nrmLen2 > 1e-8 ? nrmWorld * inversesqrt(nrmLen2) : vec3(0.0);
+    // Capture geometry derivatives before class/cache divergence. View-space
+    // coordinates avoid large-world precision loss; cached terrain pays no
+    // additional plane normalization or per-pixel placed-shadow sampling.
+    vec3 drtReceiverDx = dFdx(viewPos.xyz), drtReceiverDy = dFdy(viewPos.xyz);
+    drtUncachedReceiverNormal = normal;
+    vec3 placedNormal = normal;
+    bool placedNormalToken = false;
+    uint placedNativeToken = DRT_MEMO_GENERIC_NORMAL;
+#if defined(DRT_MEMO_ONLY) && !defined(DRT_PERFORMANCE_NO_PLS)
+    vec3 stablePlacedNormal;
+    bool ordinaryMemoReceiver = noCullTag < 0.5 && grassTag + foliageTag < 0.5 && !placedPrepared;
+    // The native/scratch normal attachment is RGBA16F at the deferred extent.
+    // Fetch this opaque-only token by integer pixel so sampler filtering cannot
+    // interpolate its half-float bits. Other shading retains sampled normal XYZ.
+    float placedNormalPayload = texelFetch(gNormal, ivec2(gl_FragCoord.xy), 0).w;
+    placedNormalToken = ordinaryMemoReceiver && placedNormalPayload <= -1.0 && placedNormalPayload > -16.0;
+    if (placedNormalToken) {
+        bool validToken = drtDecodePlacedSurfaceNormal(placedNormalPayload, true, stablePlacedNormal);
+        // A loose geometric check rejects mismatched/interpolated edge payloads
+        // without turning harmless half-float camera rounding into a key toggle.
+        bool alignedToken = validToken && dot(stablePlacedNormal, normal) > 0.95;
+        placedNormal = alignedToken ? stablePlacedNormal : vec3(0.0);
+        // Carry the raw identity through to node projection and PCF. An invalid
+        // ordinary token remains native fallback; it must not become a generic key.
+        placedNativeToken = alignedToken ? drtPlacedSurfaceNormalToken(placedNormalPayload) : 0u;
+    }
+#endif
 
+#ifdef DRT_DEFERRED_DEBUG
     if (drtDebugView != 0) {
         outColor = vec4(drtDeferredDebugColor(viewPos.xyz, nrm4.xyz, voxSun, glowVec.r), 1.0);
         outGlow = vec4(0.0);
         outGPosition = ptGPos;
         return;
     }
+#endif
+
+    drtAuthoredPlaneValid = placedNormalToken && placedNativeToken > 0u &&
+        placedNativeToken < 4096u && drtAuthoredReceiverPosition(placedNativeToken,drtAuthoredReceiverView);
+
+    if (!drtAuthoredPlaneValid && grassTag + foliageTag < 0.5 && !placedPrepared) {
+        // Unsupported models can have quantized or synthetic authored normals.
+        // Recover their actual receiving plane without a pixel-area cutoff.
+        float dx2 = dot(drtReceiverDx, drtReceiverDx), dy2 = dot(drtReceiverDy, drtReceiverDy);
+        if (min(dx2, dy2) > 1e-30) {
+            vec3 plane = cross(drtReceiverDx * inversesqrt(dx2), drtReceiverDy * inversesqrt(dy2));
+            float plane2 = dot(plane, plane);
+            if (plane2 > 1e-12)
+                drtUncachedReceiverNormal = mat3(invModelViewMatrix) * (plane * inversesqrt(plane2));
+        }
+    }
 
     // Only wind foliage uses the unshadowed/additive local-light route. Static
     // no-cull surfaces receive the solid terrain's shadowed maximum blend.
-    drtDeferredRelight(albedo, blockBright, rawAlbedo, viewPos.xyz, nrm4.xyz, normal,
-        voxSun, actualVoxSun, glowVec.r, placedPrepared ? -1.0 : grassTag + foliageTag);
+    drtDeferredRelight(albedo, blockBright, rawAlbedo, viewPos.xyz, nrm4.xyz, placedNormal,
+        placedNativeToken, voxSun, actualVoxSun, glowVec.r, placedPrepared ? -1.0 : grassTag + foliageTag);
+
 
     float fogAmount = clamp((ptGPos.w - glowVec.r) * 0.5, 0.0, 1.0);
     float murkiness = deferredMurkiness(projZ);
@@ -174,11 +253,18 @@ void main(void)
         fogAmount, drtCombineSunDarkening(b, nb), worldPos.xyz);
 
 
+    if(drtDeferredIlluminationPayload!=0 && drtAuthoredPlaneValid)
+        // A carries the exact ordinary normal token, not material coverage. This
+        // detached texture supplies replay's normal guard without sampling the
+        // primary GNormal target while native replay also writes that target.
+        outDiffuseIrradiance=vec4(drtDeferredDiffuseLocal + drtDeferredDiffuseSun*drtAppliedSunScale,
+            drtPackPlacedSurfaceNormal(placedNativeToken));
+
     float bloomMask = 0.0;
 
 #if SHADOWQUALITY > 0
     tl_applyBacklightValue(outColor.rgb, bloomMask, rawAlbedo, worldPos.xyz, df_sunShadow, 0.0,
-        noCullTag > 0.5 ? foliageLighting.y : nrm4.w);
+        noCullTag > 0.5 ? foliageLighting.y : placedNormalToken ? 0.0 : nrm4.w);
 #endif
 
     if (specularStrength > 0.0) {

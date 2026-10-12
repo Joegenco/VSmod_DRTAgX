@@ -44,7 +44,10 @@ internal sealed class HdrMipResources : IDisposable
                 Width[i] = w;
                 Height[i] = h;
                 Scene[i] = CreateTexture(w, h, PixelInternalFormat.Rgba16f, PixelFormat.Rgba);
-                Scratch[i] = CreateTexture(w, h, PixelInternalFormat.Rgba16f, PixelFormat.Rgba);
+                // Reconstruction writes the finest level to Bloom and starts from
+                // the unmodified coarsest Scene. Only intermediate scratch is needed.
+                if (i > 0 && i < ActiveLevels - 1)
+                    Scratch[i] = CreateTexture(w, h, PixelInternalFormat.Rgba16f, PixelFormat.Rgba);
                 w = Math.Max(1, w / 2);
                 h = Math.Max(1, h / 2);
             }

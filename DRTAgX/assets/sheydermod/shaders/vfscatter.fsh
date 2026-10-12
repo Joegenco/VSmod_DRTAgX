@@ -47,6 +47,15 @@ vec3 reconstructWorldPos(vec2 uv, float depth) {
     return world.xyz / world.w;
 }
 
+float vf_sceneDepth(sampler2D source, vec2 uv) {
+    // Select one actual receiver at a half-resolution ray's center. Linear
+    // depth filtering across a silhouette invents a surface behind the wall;
+    // the final depth-aware upscale uses this exact same texel mapping.
+    ivec2 size = textureSize(source, 0);
+    ivec2 pixel = clamp(ivec2(uv * vec2(size)), ivec2(0), size - ivec2(1));
+    return texelFetch(source, pixel, 0).r;
+}
+
 // Atmosphere-only color handoff; native step placement and shadow visibility remain intact.
 vec3 drtVolumetricSunRadiance(vec3 rayDir) {
     // The fog helper extends the solar phase below the horizon without repeating
@@ -61,11 +70,11 @@ vec3 drtVolumetricSunRadiance(vec3 rayDir) {
 void main(void)
 {
 
-    float depth = texture(depthTexture, texcoord).r;
+    float depth = vf_sceneDepth(depthTexture, texcoord);
 
     float effDepth = depth;
     if (vf_HasWaterDepth > 0.5)
-        effDepth = min(depth, texture(vf_LiquidDepth, texcoord).r);
+        effDepth = min(depth, vf_sceneDepth(vf_LiquidDepth, texcoord));
 
     vec3  fragWorld = reconstructWorldPos(texcoord, effDepth);
     vec3  ray       = fragWorld - vf_CameraWorldPos;
@@ -90,7 +99,12 @@ void main(void)
     vec3 dStep     = (marchDist * vf_InvSteps) * shadowDir;
     vec3 p         = vf_ShadowRayStart + dStep * dither;
 
-    p.z -= vf_ShadowBias;
+    // Air samples do not need the surface shader's large acne offset. Bound
+    // displacement toward the sun to 2 cm, independent of cascade depth span,
+    // so a normalized far-map bias cannot move samples through a thin roof.
+    float shadowDepthPerBlock = length(vec3(vf_ToShadowSpaceFar[0].z,
+        vf_ToShadowSpaceFar[1].z, vf_ToShadowSpaceFar[2].z));
+    p.z -= min(max(vf_ShadowBias, 0.0), 0.02 * shadowDepthPerBlock);
 
     float litAccum = 0.0;
     for (int i = 0; i < steps; i++) {

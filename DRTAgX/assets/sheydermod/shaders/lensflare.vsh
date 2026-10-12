@@ -20,6 +20,12 @@ flat out vec3 lf_streakTint;
 flat out vec3 lf_pointTint;
 flat out float lf_gain;
 
+float lf_tintTransition(float start, float end, float value) {
+    // Allowed endpoint presets can collapse a color interval. Define its hard
+    // transition explicitly: GLSL smoothstep requires strictly ordered edges.
+    return end > start ? smoothstep(start, end, value) : step(start, value);
+}
+
 void lf_forward(vec3 sunPosScreenIn, vec3 sunPos3dIn, vec3 playerViewVector) {
     lf_sunPosScreen = sunPosScreenIn;
     lf_sunInFront = step(0.0, dot(sunPos3dIn, playerViewVector));
@@ -37,8 +43,8 @@ void lf_forward(vec3 sunPosScreenIn, vec3 sunPos3dIn, vec3 playerViewVector) {
         1.0 / (radius * radius), invFrameSize.y > 0.0 ? invFrameSize.y / max(invFrameSize.x, 1e-6) : 1.0);
     float m1 = clamp(lf_ColorMid1, 0.0, 1.0);
     float m2 = clamp(max(lf_ColorMid2, m1 + 0.001), 0.0, 1.0);
-    vec3 tint = mix(lf_TintCenter, lf_TintMid, smoothstep(0.0, m1, edge));
-    lf_pointTint = mix(tint, lf_TintEdge, smoothstep(m1, m2, edge)) * max(0.0, lf_PointBrightness);
+    vec3 tint = mix(lf_TintCenter, lf_TintMid, lf_tintTransition(0.0, m1, edge));
+    lf_pointTint = mix(tint, lf_TintEdge, lf_tintTransition(m1, m2, edge)) * max(0.0, lf_PointBrightness);
     lf_streakTint = lf_TintCenter * max(0.0, lf_StreakBrightness);
     // Preserve the original threshold on visibility before applying spatial/brightness gains.
     float gate = lf_Intensity * lf_sunInFront * lf_sunVisible;

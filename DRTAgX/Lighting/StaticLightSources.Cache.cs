@@ -9,15 +9,34 @@ internal sealed partial class StaticLightSources
 
     private void ResetWorld(object world)
     {
-        WorldGeneration++; Revision++;
+        WorldGeneration++;
+        Revision++;
         _world = world;
-        _byChunk.Clear(); _chunkCoordinates.Clear(); _cacheLru.Clear();
-        _missingChunks.Clear(); _dirty.Clear(); _retryNextFrame.Clear();
-        _residentChunks.Clear(); _activeChunks.Clear(); _scanOrder.Clear();
+        _sourceDemand.Clear(); // No cached admission crosses a world boundary.
+        _byChunk.Clear();
+        _chunkCoordinates.Clear();
+        _cacheLru.Clear();
+        _missingChunks.Clear();
+        _dirty.Clear();
+        _retryNextFrame.Clear();
+        _residentChunks.Clear();
+        _activeChunks.Clear();
+        _scanOrder.Clear();
         foreach (var queue in _discovery) queue.Clear();
-        _queued.Clear(); _byPosition.Clear(); _notifications.Clear();
-        _sources.Clear(); _sourceChunks.Clear();
-        _emptyChunks.Clear(); _emptyCursor = 0;
+        _queued.Clear();
+        _byPosition.Clear();
+        _notifications.Clear();
+        _sources.Clear();
+        _sourceChunks.Clear();
+        _sourceChanges.Clear();
+        _knownSources.Clear();
+        _knownChunks.Clear();
+        _knownIdentityCursor = 0;
+        _knownDirty = true;
+        SourceContentRevision++;
+        _missingRetryCursor = 0;
+        _emptyChunks.Clear();
+        _emptyCursor = 0;
         _blockEdits.Clear();
         _unconfirmedRemovals.Clear();
         _outstanding = 0;
@@ -29,30 +48,53 @@ internal sealed partial class StaticLightSources
 
     private void ReconcileNeighborhood(ChunkKey center, Vec3d camera)
     {
-        _center = center; _hasCenter = _hasOrderCamera = true;
-        _orderCameraX = camera.X; _orderCameraY = camera.Y; _orderCameraZ = camera.Z;
+        _center = center;
+        _hasCenter = _hasOrderCamera = true;
+        _orderCameraX = camera.X;
+        _orderCameraY = camera.Y;
+        _orderCameraZ = camera.Z;
         // Rebuild active empty identities without retaining checks for cold chunks.
         foreach (ChunkKey key in _emptyChunks)
-            if (_byChunk.TryGetValue(key, out var cached)) cached.EmptyIndex = -1;
-        _emptyChunks.Clear(); _emptyCursor = 0;
-        _scanOrder.Clear(); _activeChunks.Clear();
+            if (_byChunk.TryGetValue(key, out var cached))
+                cached.EmptyIndex = -1;
+        _emptyChunks.Clear();
+        _emptyCursor = 0;
+        _scanOrder.Clear();
+        _activeChunks.Clear();
         for (int y = -RadiusInChunks; y <= RadiusInChunks; y++)
-            for (int z = -RadiusInChunks; z <= RadiusInChunks; z++)
-                for (int x = -RadiusInChunks; x <= RadiusInChunks; x++)
-                {
-                    ChunkKey key = new(center.X + x, center.Y + y, center.Z + z);
-                    if (!InRange(key)) continue;
-                    _scanOrder.Add(key); _activeChunks.Add(key);
-                    if (!_byChunk.TryGetValue(key, out var cached)) continue;
-                    if (cached.Chunk is not { Disposed: false }) { RemoveCached(key); Changed(key); continue; }
-                    Touch(cached);
-                    TrackEmptyChunk(key, cached);
-                }
-        // Missing keys retain coverage only within one neighborhood. A later
-        // return checks availability once; ordinary idle frames never poll them.
+        for (int z = -RadiusInChunks; z <= RadiusInChunks; z++)
+        for (int x = -RadiusInChunks; x <= RadiusInChunks; x++)
+        {
+            ChunkKey key = new(center.X + x, center.Y + y, center.Z + z);
+            if (!InRange(key) || !IsChunkDemanded(key)) continue;
+            _scanOrder.Add(key);
+            _activeChunks.Add(key);
+            if (!_byChunk.TryGetValue(key, out var cached)) continue;
+            if (cached.Chunk is not { Disposed: false })
+            {
+                RemoveCached(key);
+                Changed(key);
+                continue;
+            }
+
+            Touch(cached);
+            TrackEmptyChunk(key, cached);
+        }
+
+        // Missing keys retain coverage only within one neighborhood. A bounded
+        // rotating retry also discovers readiness when no load event arrives.
+        _staleChunks.Clear();
+        // Dormant edits are useful only while their index is retained or they
+        // remain in the local discovery halo. An uncached revisit scans truth
+        // afresh; carrying its old dirty marker forever would grow with travel.
+        foreach (ChunkKey key in _dirty)
+            if (!InRange(key) && !_byChunk.ContainsKey(key))
+                _staleChunks.Add(key);
+        foreach (ChunkKey key in _staleChunks) _dirty.Remove(key);
         _staleChunks.Clear();
         foreach (ChunkKey key in _missingChunks)
-            if (!_activeChunks.Contains(key)) _staleChunks.Add(key);
+            if (!_activeChunks.Contains(key))
+                _staleChunks.Add(key);
         foreach (ChunkKey key in _staleChunks) _missingChunks.Remove(key);
         _needsFlatten = _rebucket = true;
         _nextDiscoveryRebucket = 0; // Neighborhood changes must queue new coverage immediately.
@@ -61,13 +103,16 @@ internal sealed partial class StaticLightSources
     private void RebucketDiscovery()
     {
         foreach (var queue in _discovery) queue.Clear();
-        _queued.Clear(); _outstanding = 0;
+        _queued.Clear();
+        _outstanding = 0;
         foreach (ChunkKey key in _scanOrder)
         {
             if (Indexed(key) || _missingChunks.Contains(key)) continue;
-            _queued.Add(key); _outstanding++;
+            _queued.Add(key);
+            _outstanding++;
             _discovery[ChunkPriority(key, ChunkDistance(key))].Enqueue(key);
         }
+
         _rebucket = false;
     }
 
@@ -80,35 +125,67 @@ internal sealed partial class StaticLightSources
             if (_byChunk.TryGetValue(key, out var cached) && cached.Sources.Count > 0 &&
                 cached.Chunk is not { Disposed: false })
             {
-                RemoveCached(key); _missingChunks.Add(key); Changed(key);
+                RemoveCached(key);
+                _missingChunks.Add(key);
+                Changed(key);
+            }
+
+        // Cold completed depth owns compact source identities beyond the active
+        // discovery halo; notice their true unload without camera publication.
+        foreach (ChunkKey key in _residentChunks)
+            if (_byChunk.TryGetValue(key, out var cached) && cached.Chunk is not { Disposed: false })
+            {
+                RemoveCached(key);
+                _missingChunks.Add(key);
+                Changed(key);
             }
     }
 
     private CachedChunk Cached(ChunkKey key)
     {
-        if (_byChunk.TryGetValue(key, out var cached)) { Touch(cached); return cached; }
+        if (_byChunk.TryGetValue(key, out var cached))
+        {
+            Touch(cached);
+            return cached;
+        }
+
         cached = new CachedChunk { Node = _cacheLru.AddFirst(key) };
-        _byChunk.Add(key, cached); return cached;
+        _byChunk.Add(key, cached);
+        return cached;
     }
 
     private void Touch(CachedChunk cached)
     {
-        _cacheLru.Remove(cached.Node); _cacheLru.AddFirst(cached.Node);
+        _cacheLru.Remove(cached.Node);
+        _cacheLru.AddFirst(cached.Node);
     }
 
-    private void RemoveCached(ChunkKey key)
+    private void RemoveCached(ChunkKey key, bool semanticRemoval = true)
     {
         if (!_byChunk.Remove(key, out var cached)) return;
+        var chunk = cached.Chunk;
+        // The engine has no chunk-unload callback. Its observed disposal can
+        // expose new receivers even with a stationary camera, so wake demand
+        // once here. Evicting cold metadata is not a geometry change.
+        if (semanticRemoval && _receiverDemand != null && chunk is not { Disposed: false })
+            _receiverDemand.RequestRefresh();
         UntrackEmptyChunk(cached);
         foreach (Source source in cached.Sources)
         {
+            if (semanticRemoval) SourceChanged(source, default);
             Position position = Identity(source);
-            _byPosition.Remove(position); _unconfirmedRemovals.Remove(position);
+            _byPosition.Remove(position);
+            _unconfirmedRemovals.Remove(position);
         }
-        var chunk = cached.Chunk;
+
         if (chunk != null) _chunkCoordinates.Remove(chunk);
         _cacheLru.Remove(cached.Node);
-        if (cached.Sources.Count > 0) Revision++;
+        if (cached.Sources.Count > 0)
+        {
+            Revision++;
+            _knownDirty = true;
+        }
+
         if (_activeChunks.Contains(key)) _needsFlatten = true;
     }
 
@@ -120,13 +197,25 @@ internal sealed partial class StaticLightSources
             while (node != null && (_activeChunks.Contains(node.Value) || _residentChunks.Contains(node.Value)))
                 node = node.Previous;
             if (node == null) return;
-            RemoveCached(node.Value);
+            // Losing a cold index entry is unknown data, not an emitter edit.
+            RemoveCached(node.Value, semanticRemoval: false);
+            _dirty.Remove(node.Value); // A later uncached discovery reads current metadata.
         }
     }
 
     private void Changed(ChunkKey key)
     {
         if (_changedSet.Add(key)) _changedChunks.Add(key);
+    }
+
+    private void SourceChanged(Source previous, Source current)
+    {
+        if (previous == current) return;
+        _knownDirty = true;
+        // One revision describes this Update's complete old/new footprint batch.
+        // Consumers fall back conservatively only when an entire batch was missed.
+        if (_sourceChanges.Count == 0) SourceContentRevision++;
+        _sourceChanges.Add(new SourceChange(previous, current));
     }
 
     private void RetryScan(ChunkKey key)
@@ -146,6 +235,7 @@ internal sealed partial class StaticLightSources
             if (CompareSources(sources[middle], source) < 0) first = middle + 1;
             else end = middle;
         }
+
         sources.Insert(first, source);
     }
 }

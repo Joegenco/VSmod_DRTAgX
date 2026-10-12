@@ -1,22 +1,7 @@
-# Build and release outputs
+# Generated builds and local installation/configuration
 **/bin/
 **/obj/
 /Releases/
-/.build/
-/Tests/results/
-
-# IDE and local settings
-.vs/
-.idea/
-.vscode/
-*.user
-*.suo
-*.DotSettings.user
-.env
-.env.*
-Directory.Build.local.*
-
-# Local game data and dependencies
 **/ModConfig/
 *.dll
 *.pdb
@@ -24,12 +9,21 @@ Directory.Build.local.*
 *.log
 *.dmp
 
-# Assistant working files
+# IDE and workstation files
+.idea/
+.vs/
+.vscode/
+*.user
+*.suo
+*.DotSettings.user
+.env
+.env.*
+Directory.Build.local.*
+Thumbs.db
+.DS_Store
+
+# Private working notes
 .codex/
 .junie/
 .context/
 .VSGraphicalModdingGlossary/
-
-# OS metadata
-.DS_Store
-Thumbs.db
