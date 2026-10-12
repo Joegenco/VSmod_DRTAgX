@@ -3,7 +3,7 @@
 Client-side graphics mod for **Vintage Story 1.22.7**, by **Joegen**.
 It builds on the game's rendering and SheyderMod rather than replacing the engine.
 
-- AgX tone mapping, HDR bloom and automatic exposure.
+- AgX Display Transform, bloom and automatic exposure.
 - Atmospheric sky, ambient lighting, clouds, fog and underwater light absorption.
 - Cached placed-light lighting and shadows, prioritizing visible surfaces and local edits.
 - Shadows from held, dropped and moving lights, including animated entities.
@@ -40,7 +40,7 @@ The game supplies all referenced libraries; they are not included in this repo.
 
 - `Core/`: lifecycle, settings, dependency defaults and moving-light sources.
 - `Atmosphere/`: sky, ambient light, fog and distant-terrain/weather compatibility.
-- `HDR/`: scene buffers, bloom, exposure and final composition.
+- `RGBA16/`: scene buffers, bloom, exposure and final composition.
 - `Lighting/` and `Shadows/`: placed-light discovery/caches and moving shadow maps.
 - `Rendering/`: native hooks, deferred composition, GPU resources and uniforms.
 - `UI/`: in-game settings. `assets/`: GLSL and textures.
