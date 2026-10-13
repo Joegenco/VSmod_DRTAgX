@@ -29,7 +29,8 @@ out vec2 uv;
 
 #include vertexflagbits.ash
 #include shadowcoords.vsh
-#define DRT_FORWARD_PLACED_LIGHTS 1
+// Rain, splashes and ordinary billboards use the same baked light sample as
+// cube debris. An extra unshadowed PLS sum would bypass its wall occlusion.
 #include fogandlight.vsh
 #include vertexwarp.vsh
 

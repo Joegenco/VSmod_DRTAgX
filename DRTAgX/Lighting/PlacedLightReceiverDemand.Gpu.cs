@@ -17,6 +17,7 @@ internal sealed partial class PlacedLightReceiverDemand
         internal IntPtr Fence, Mapped;
         internal ulong Serial;
         internal object? World;
+        internal bool Additive;
     }
 
     private readonly Slot[] _slots = { new(), new(), new() };
@@ -33,6 +34,9 @@ internal sealed partial class PlacedLightReceiverDemand
     private double _submittedCameraX, _submittedCameraY, _submittedCameraZ;
     private Slot? _cycleSlot;
     private int _pixelOrigin, _pixelExtent, _workRegion = -1;
+    private int _pixelStride, _pixelPhase, _workStride = 1, _revealPhase;
+    private long _lastReveal;
+    private double _forwardX, _forwardY, _forwardZ, _revealCameraX, _revealCameraY, _revealCameraZ;
     private bool _workBegin = true, _workComplete = true;
     internal int RegionDispatches { get; private set; }
 
@@ -110,7 +114,12 @@ internal sealed partial class PlacedLightReceiverDemand
             if (projectionChanged || teleport || _submittedDepth != primary.DepthTextureId ||
                 _submittedWidth != primary.Width || _submittedHeight != primary.Height) RequestRefresh();
             bool immediate = Volatile.Read(ref _refresh) != 0;
-            if (!immediate && !_cadence.Due(now))
+            // Large reveals need not wait for their screen tile in the three-
+            // second maintenance cycle. Sample 1/16 of the entire view, at
+            // most ten times/second; publication only adds precise demand.
+            bool reveal = RevealDue(changed, view, cameraWorld, now);
+            bool due = _cadence.Due(now);
+            if (!immediate && !due && !reveal)
             {
                 if (_cadence.Pending) DeferredMotionFrames++;
                 return;
@@ -143,6 +152,9 @@ internal sealed partial class PlacedLightReceiverDemand
                 _rotation[column * 4 + row] = (float)_inverseView[column * 4 + row];
             _rotation[15] = 1;
             bool full = immediate || _cadence.FullView;
+            // A due exact region takes precedence; frequent reveals must never
+            // postpone completion/retirement of the authoritative cycle.
+            bool priority = !full && !due && reveal;
             // Partial cycles have no feedback fence yet but still own their
             // slot and shared scratch; normal admission cannot reuse them.
             Slot? free = full ? null : _cycleSlot;
@@ -154,10 +166,11 @@ internal sealed partial class PlacedLightReceiverDemand
                         break;
                     }
 
-            if (free == null) return;
-            _workRegion = full ? -1 : _cadence.Region;
+            if (free == null || free.Fence != IntPtr.Zero) return;
+            _workRegion = full || priority ? -1 : _cadence.Region;
+            _workStride = priority ? 4 : 1;
             _workBegin = full || _cycleSlot == null;
-            _workComplete = full || _workRegion == PlacedLightDemandCadence.RegionsPerCycle - 1;
+            _workComplete = full || priority || _workRegion == PlacedLightDemandCadence.RegionsPerCycle - 1;
             if (_workBegin)
             {
                 // One fixed world grid keeps tiles from moving views in the
@@ -166,9 +179,9 @@ internal sealed partial class PlacedLightReceiverDemand
                 free.Y = checked((int)Math.Floor(cameraWorld.Y / CellBlocks)) - Axis / 2;
                 free.Z = checked((int)Math.Floor(cameraWorld.Z / CellBlocks)) - Axis / 2;
                 free.World = _world;
-                free.Serial = ++_serial;
             }
 
+            free.Additive = priority;
             _cycleSlot = full ? null : free;
             // Clear before submission so a callback arriving during GL work
             // remains pending rather than being accidentally acknowledged.
@@ -181,11 +194,12 @@ internal sealed partial class PlacedLightReceiverDemand
             _submittedCameraY = cameraWorld.Y;
             _submittedCameraZ = cameraWorld.Z;
             _submittedCameraValid = true;
-            _cadence.Submitted(now, full);
-            if (!full) RegionDispatches++;
+            if (!priority) _cadence.Submitted(now, full);
+            if (priority || full) RememberRevealPose(view, cameraWorld, now);
+            if (!full && !priority) RegionDispatches++;
             if (_workComplete)
             {
-                _cycleSlot = null;
+                if (!priority) _cycleSlot = null;
                 Submissions++;
                 if (immediate) ImmediateSubmissions++;
                 else MotionSubmissions++;
@@ -280,6 +294,8 @@ internal sealed partial class PlacedLightReceiverDemand
             _camera = GL.GetUniformLocation(_program, "cameraInGrid");
             _pixelOrigin = GL.GetUniformLocation(_program, "pixelOrigin");
             _pixelExtent = GL.GetUniformLocation(_program, "pixelExtent");
+            _pixelStride = GL.GetUniformLocation(_program, "pixelStride");
+            _pixelPhase = GL.GetUniformLocation(_program, "pixelPhase");
         }
         catch
         {
@@ -337,6 +353,9 @@ internal sealed partial class PlacedLightReceiverDemand
                 GL.BufferData(BufferTarget.ShaderStorageBuffer, ScratchBytes, IntPtr.Zero, BufferUsageHint.DynamicCopy);
             }
 
+            // A full refresh can abandon an unfinished shader-written cycle.
+            // Order those stores before clearing its reusable scratch storage.
+            if (_workBegin) GL.MemoryBarrier(MemoryBarrierFlags.BufferUpdateBarrierBit);
             GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _scratch);
             if (_workBegin)
                 GL.ClearBufferData(BufferTarget.ShaderStorageBuffer, PixelInternalFormat.R32ui, PixelFormat.RedInteger,
@@ -366,6 +385,9 @@ internal sealed partial class PlacedLightReceiverDemand
 
             GL.Uniform2(_pixelOrigin, x0, y0);
             GL.Uniform2(_pixelExtent, x1 - x0, y1 - y0);
+            GL.Uniform1(_pixelStride, _workStride);
+            int phase = _workStride > 1 ? _revealPhase++ & 15 : 0;
+            GL.Uniform2(_pixelPhase, phase & 3, phase >> 2);
             GL.UniformMatrix4(_projection, 1, false, _inverseProjection);
             GL.UniformMatrix4(_view, 1, false, _rotation);
             // Only small relative coordinates reach float GLSL. Absolute world
@@ -373,11 +395,21 @@ internal sealed partial class PlacedLightReceiverDemand
             GL.Uniform3(_camera, (float)(cameraWorld.X - slot.X * 8.0),
                 (float)(cameraWorld.Y - slot.Y * 8.0), (float)(cameraWorld.Z - slot.Z * 8.0));
             GL.MemoryBarrier(MemoryBarrierFlags.TextureFetchBarrierBit | MemoryBarrierFlags.BufferUpdateBarrierBit);
-            GL.DispatchCompute((x1 - x0 + 15) / 16, (y1 - y0 + 15) / 16, 1);
+            int groupPixels = 16 * _workStride;
+            GL.DispatchCompute((x1 - x0 + groupPixels - 1) / groupPixels,
+                (y1 - y0 + groupPixels - 1) / groupPixels, 1);
             GL.MemoryBarrier(MemoryBarrierFlags.ShaderStorageBarrierBit);
-            // Only a complete cycle or immediate full refresh may compact and
-            // copy admission feedback; intermediate tiles remain private.
+            // Exact cycle completion replaces demand; an interim sparse reveal
+            // only adds coverage. Both copy immutable feedback behind a fence.
             if (!_workComplete) return;
+            slot.Serial = ++_serial;
+            // Priority snapshots compact the same growing scratch repeatedly.
+            // Restart only the output record counter, preserving accumulated
+            // receiver bounds and occupancy until the exact cycle completes.
+            GL.MemoryBarrier(MemoryBarrierFlags.BufferUpdateBarrierBit);
+            GL.BindBuffer(BufferTarget.ShaderStorageBuffer, slot.Buffer);
+            GL.ClearBufferSubData(BufferTarget.ShaderStorageBuffer, PixelInternalFormat.R32ui,
+                (IntPtr)(3 * sizeof(uint)), (IntPtr)sizeof(uint), PixelFormat.RedInteger, PixelType.UnsignedInt, _zero);
             GL.UseProgram(_compactProgram);
             GL.DispatchCompute(Axis * Axis * Axis / 64, 1, 1);
             GL.MemoryBarrier(MemoryBarrierFlags.ShaderStorageBarrierBit | MemoryBarrierFlags.BufferUpdateBarrierBit);
@@ -412,6 +444,7 @@ internal sealed partial class PlacedLightReceiverDemand
         _cadence.Reset();
         _cycleSlot = null;
         _projectionValid = _submittedCameraValid = false;
+        _lastReveal = 0;
         RequestRefresh();
         Revision++;
         // Old dispatches retain their own immutable slots and are discarded on

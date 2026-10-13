@@ -35,8 +35,8 @@ out vec4 gnormal;
 
 #include vertexflagbits.ash
 #include shadowcoords.vsh
-// Match forward placed-light falloff; particle lighting has no depth-map reads.
-#define DRT_FORWARD_PLACED_LIGHTS 1
+// Native particle samples receive the baked block-light visibility on the CPU.
+// Do not add unshadowed placed-source radiance through surrounding walls.
 #define DRT_DYNAMIC_NORMAL_VIEW (modelViewMatrix * vec4(normal, 0.0)).xyz
 #include fogandlight.vsh
 #include vertexwarp.vsh

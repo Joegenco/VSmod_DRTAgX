@@ -93,10 +93,10 @@ internal sealed class HeldProjectionFit : IDisposable
                     GL.UseProgram(p);
                     GL.Uniform4(loc.Lights, 2, _lights);
                     GL.Uniform1(loc.Count, tiles);
+                    GL.UniformMatrix4(loc.Inverse, 1, false, _inverse);
                     if (pass == 0)
                     {
                         GL.Uniform1(loc.Depth, 13);
-                        GL.UniformMatrix4(loc.Inverse, 1, false, _inverse);
                         GL.Uniform2(loc.Dimensions, api.Render.FrameWidth, api.Render.FrameHeight);
                         GL.Uniform1(loc.Width, width);
                     }
@@ -116,9 +116,9 @@ internal sealed class HeldProjectionFit : IDisposable
         catch (Exception ex)
         {
             // The CPU fallback was uploaded before dispatch; failures retain
-            // one conservative projection, never the previous frame's fit.
+            // one bounded projection, never the previous frame's fit.
             if (!_failed)
-                api.Logger.Warning("[DRT AgX] Held projection fit unavailable; retaining conservative projection: {0}",
+                api.Logger.Warning("[DRT AgX] Held projection fit unavailable; retaining bounded projection: {0}",
                     ex.Message);
             _failed = true;
         }
@@ -136,32 +136,37 @@ internal sealed class HeldProjectionFit : IDisposable
 
     internal static void Fallback(float[] camera, float[] light, float range, float[] result, int offset)
     {
-        // Every camera-frustum receiver at depth >= its near plane is enclosed.
-        // A camera-plane light only adds the bounded lateral offset / nearDepth.
-        float candidateNear = camera[14] / (camera[10] - 1f);
-        float near = float.IsFinite(candidateNear) ? Math.Max(.005f, candidateNear) : .005f;
-        float sx = float.IsFinite(camera[0]) && camera[0] > 1e-6f ? 1f / camera[0] : 10f;
-        float sy = float.IsFinite(camera[5]) && camera[5] > 1e-6f ? 1f / camera[5] : 10f;
-        float oxCamera = float.IsFinite(camera[8]) ? camera[8] : 0,
-            oyCamera = float.IsFinite(camera[9]) ? camera[9] : 0;
-        float minX = (-1 + oxCamera) * sx - Math.Max(light[0], 0) / near;
-        float maxX = (1 + oxCamera) * sx - Math.Min(light[0], 0) / near;
-        float minY = (-1 + oyCamera) * sy - Math.Max(light[1], 0) / near;
-        float maxY = (1 + oyCamera) * sy - Math.Min(light[1], 0) / near;
-        float dx = (maxX - minX) * 1.2f, dy = (maxY - minY) * 1.2f, cx = (minX + maxX) * .5f, cy = (minY + maxY) * .5f;
-        float px = 2f / dx, py = 2f / dy, ox = 2f * cx / dx, oy = 2f * cy / dy, far = range + .5f;
+        // Match the GPU's finite useful cone. Covering arbitrarily tangential
+        // receivers via handOffset / cameraNear destroys map resolution; the
+        // receiver shader blends out of shadowing at this cone's boundary.
+        SlopeLimits(camera, out var sx, out var sy);
+        float px = 1f / sx, py = 1f / sy, far = range + .5f;
         const float n = .005f;
         Array.Clear(result, offset, 16);
         result[offset] = px;
         result[offset + 5] = py;
-        result[offset + 8] = ox;
-        result[offset + 9] = oy;
         result[offset + 10] = (far + n) / (n - far);
         result[offset + 11] = -1;
-        result[offset + 12] = -px * light[0] - ox * light[2];
-        result[offset + 13] = -py * light[1] - oy * light[2];
+        result[offset + 12] = -px * light[0];
+        result[offset + 13] = -py * light[1];
         result[offset + 14] = 2f * far * n / (n - far) - result[offset + 10] * light[2];
         result[offset + 15] = light[2];
+    }
+
+    internal static void SlopeLimits(float[] camera, out float x, out float y)
+    {
+        // tan(60 degrees)..tan(80 degrees), matching movinglightfit.csh.
+        // Include asymmetric camera frusta; malformed matrices use the widest
+        // supported cone until a valid current-frame projection is available.
+        x = Axis(camera[0], camera[8]);
+        y = Axis(camera[5], camera[9]);
+        return;
+
+        static float Axis(float scale, float center)
+        {
+            var slope = (1f + Math.Abs(center)) / Math.Abs(scale) * 1.5f;
+            return float.IsFinite(slope) ? Math.Clamp(slope, 1.7320508f, 5.6712818f) : 5.6712818f;
+        }
     }
 
     private void Ensure(ICoreClientAPI api)

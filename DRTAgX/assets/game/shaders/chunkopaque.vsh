@@ -132,6 +132,8 @@ void main(void)
         all(equal((uvec4(vdata.flags)>>13u)&uvec4(4095u),uvec4(receiverToken)));
     drtAuthorReceiverPlane(vertexPosition,vdata.xyz,receiverToken,receiverStatic);
     drtAuthorReceiverBounds(vdata.xyz,2.0*vdata.xyzA,2.0*vdata.xyzB,receiverToken);
+    if(any(notEqual(vdata.flags & ivec4(WindModeBitMask),ivec4(0))))
+        drtAuthorFoliageReceiver(vertexPosition,vdata.xyz,2.0*vdata.xyzA,2.0*vdata.xyzB);
 #else
     drtAuthorReceiverPlane(vertexPosition,vertexPosition,receiverToken,(renderFlags & WindModeBitMask)==0);
 #endif
@@ -146,7 +148,9 @@ void main(void)
 
 	worldPos = applyVertexWarping(renderFlags, truePos);
 	worldPos = applyGlobalWarping(worldPos);
-    drtReceiverWarp = length(worldPos.xyz - truePos.xyz);
+    // Wind moves the rasterized card after its PLS coordinates were authored.
+    // Global terrain warping still invalidates unsupported cache geometry.
+    drtReceiverWarp = length((drtReceiverBoundsValid==2 ? drtPlacedRestPos : worldPos.xyz) - truePos.xyz);
 	
 	camPos = modelViewMatrix * worldPos;
 	// Dynamic point lights need the actual face normal before applyLight runs.

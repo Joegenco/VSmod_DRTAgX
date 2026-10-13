@@ -15,6 +15,16 @@ uniform ivec2 heldSize;
 shared vec4 slopeScratch[64];
 shared vec4 infoScratch[64];
 
+vec2 fitSlopeLimit() {
+    // One forward map has finite angular resolution. A receiver almost level
+    // with the emitter must not stretch the entire room's map toward 180 degrees.
+    // Cover 1.5 times the camera slopes, bounded to 120..160 degrees per axis.
+    vec4 a=inverseProjection*vec4(-1,-1,0,1);
+    vec4 b=inverseProjection*vec4(1,1,0,1);
+    vec2 cameraSlopes=max(abs(a.xy/a.z),abs(b.xy/b.z));
+    return clamp(cameraSlopes*1.5,vec2(1.7320508),vec2(5.6712818));
+}
+
 void mergeBounds(uint lane) {
     barrier();
     for (uint stride=32u; stride>0u; stride>>=1u) {
@@ -48,7 +58,7 @@ void main() {
     slopeScratch[lane]=slopes;infoScratch[lane]=info;mergeBounds(lane);
     if(lane!=0u)return;
     slopes=slopeScratch[0];info=infoScratch[0];
-    if(info.z>0.0)return; // CPU-uploaded conservative fallback remains current-frame.
+    if(info.z>0.0)return; // CPU-uploaded bounded fallback remains current-frame.
     if(info.y==0.0 || handLight[hand].w<=0.0) {
         heldStatus[hand]=vec4(0); heldMatrices[hand]=mat4(0); return;
     }
@@ -56,10 +66,14 @@ void main() {
     vec2 width=max(slopes.zw-slopes.xy,vec2(1e-4));
     // Match each axis to its actual rectangular map dimension, preserving
     // the same filter footprint and snapped texel grid at any view aspect.
-    vec2 pad=width*(0.1+4.0/vec2(heldSize)) + vec2(0.025/max(info.x,0.005));
+    // Limit the offset's angular padding too: a nearby accepted receiver may
+    // approach the projection axis without requiring a huge field of view.
+    vec2 pad=width*(0.1+4.0/vec2(heldSize)) + min(width*0.15,vec2(0.025/max(info.x,0.005)));
     vec2 lo=slopes.xy-pad,hi=slopes.zw+pad;
     vec2 stepSize=(hi-lo)/vec2(max(heldSize-ivec2(4),ivec2(1)));
     lo=floor(lo/stepSize)*stepSize;hi=ceil(hi/stepSize)*stepSize;
+    vec2 slopeLimit=fitSlopeLimit();
+    lo=max(lo,-slopeLimit);hi=min(hi,slopeLimit);
     const float nearPlane=0.005;
     float farPlane=handLight[hand].w+0.5;
     mat4 p=mat4(0);
@@ -75,6 +89,7 @@ void main() {
     ivec2 start=ivec2(t%tileWidth,t/tileWidth)*64;
     // Reconstruct each pixel once, then contribute to both independent hands.
     vec4 slopes[2];vec4 infos[2];
+    vec2 slopeLimit=fitSlopeLimit();
     for(int h=0;h<2;++h){slopes[h]=vec4(1e30,1e30,-1e30,-1e30);infos[h]=vec4(1e30,0,0,0);}
     for(int k=int(lane);k<4096;k+=64) {
         ivec2 pixel=start+ivec2(k%64,k/64);
@@ -93,8 +108,15 @@ void main() {
             float reach=handLight[h].w+0.25;
             if(dot(q,q)>reach*reach)continue;
             float forward=-q.z;
-            if(forward<=0.005){infos[h].z+=1.0;continue;}
+            // Receivers behind the forward projector intentionally use the
+            // unshadowed fallback. They are not corrupt depth: letting one of
+            // them invalidate the whole fit destroys useful map resolution.
+            if(forward<=0.005)continue;
             vec2 slope=q.xy/forward;
+            // Reject instead of clamping. One grazing/clipped pixel must not
+            // pin the map to its maximum cone and reduce every other shadow.
+            // The receiver shader fades to unshadowed outside the useful map.
+            if(any(greaterThan(abs(slope),slopeLimit)))continue;
             slopes[h].xy=min(slopes[h].xy,slope);slopes[h].zw=max(slopes[h].zw,slope);
             infos[h].x=min(infos[h].x,forward);infos[h].y+=1.0;
         }

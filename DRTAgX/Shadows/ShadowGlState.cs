@@ -11,13 +11,28 @@ namespace DRTAgX;
 /// </summary>
 internal sealed class ShadowGlState : IDisposable
 {
-    private int _drawFbo, _readFbo, _program, _vao, _activeTexture, _texture0,
+    private int _drawFbo,
+        _readFbo,
+        _program,
+        _vao,
+        _activeTexture,
+        _texture0,
         _sampler0,
-        _ssbo, _ubo,
-        _arrayBuffer, _elementBuffer, _depthFunction,
-        _viewportX, _viewportY, _viewportW, _viewportH,
-        _scissorX, _scissorY, _scissorW, _scissorH;
-    private bool _depth, _blend, _cull, _scissor, _polygonOffset, _depthMask;
+        _ssbo,
+        _ubo,
+        _arrayBuffer,
+        _elementBuffer,
+        _depthFunction,
+        _viewportX,
+        _viewportY,
+        _viewportW,
+        _viewportH,
+        _scissorX,
+        _scissorY,
+        _scissorW,
+        _scissorH;
+
+    private bool _depth, _depthClamp, _blend, _cull, _scissor, _polygonOffset, _depthMask;
     private double _clearDepth;
     private IndexedBufferState _uniform5;
     private IndexedBufferState _storage3;
@@ -27,8 +42,13 @@ internal sealed class ShadowGlState : IDisposable
     /// Captures the active OpenGL state across all rasterization, binding, and framebuffer targets.
     /// </summary>
     private readonly int[] _viewport = new int[4], _scissorBox = new int[4];
+
     internal ShadowGlState() => Capture();
-    internal ShadowGlState(bool capture) { if (capture) Capture(); }
+
+    internal ShadowGlState(bool capture)
+    {
+        if (capture) Capture();
+    }
 
     // A renderer can reuse one saver across non-overlapping passes, avoiding
     // per-bake state objects and query arrays. Capture/Dispose must remain paired.
@@ -55,6 +75,7 @@ internal sealed class ShadowGlState : IDisposable
         GL.GetBoolean(GetPName.DepthWritemask, out _depthMask);
         GL.GetBoolean(GetPName.ColorWritemask, _colorMask);
         _depth = GL.IsEnabled(EnableCap.DepthTest);
+        _depthClamp = GL.IsEnabled(EnableCap.DepthClamp);
         _blend = GL.IsEnabled(EnableCap.Blend);
         _cull = GL.IsEnabled(EnableCap.CullFace);
         _scissor = GL.IsEnabled(EnableCap.ScissorTest);
@@ -84,6 +105,7 @@ internal sealed class ShadowGlState : IDisposable
         GL.ClearDepth(_clearDepth);
         GL.ColorMask(_colorMask[0], _colorMask[1], _colorMask[2], _colorMask[3]);
         Set(EnableCap.DepthTest, _depth);
+        Set(EnableCap.DepthClamp, _depthClamp);
         Set(EnableCap.Blend, _blend);
         Set(EnableCap.CullFace, _cull);
         Set(EnableCap.ScissorTest, _scissor);
@@ -96,6 +118,7 @@ internal sealed class ShadowGlState : IDisposable
 
     private static void Set(EnableCap cap, bool enabled)
     {
-        if (enabled) GL.Enable(cap); else GL.Disable(cap);
+        if (enabled) GL.Enable(cap);
+        else GL.Disable(cap);
     }
 }

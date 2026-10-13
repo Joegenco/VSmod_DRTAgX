@@ -16,7 +16,7 @@ internal static class ConfigDefaultsVersion
     {
         var assembly = typeof(ConfigDefaultsVersion).Assembly;
         var version = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
-                      ?? assembly.GetName().Version?.ToString(3) ?? "2.1.0";
+                      ?? assembly.GetName().Version?.ToString(3) ?? "2.1.1";
         var metadata = version.IndexOf('+');
         return metadata < 0 ? version : version[..metadata];
     }

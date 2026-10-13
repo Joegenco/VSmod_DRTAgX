@@ -147,6 +147,14 @@ internal sealed partial class PlacedLightReceiverDemand : IDisposable
     {
         if (slot.Serial <= _acceptedSerial || !ReferenceEquals(slot.World, _world)) return;
         _acceptedSerial = slot.Serial;
+        // Sparse reveals are additive hints. Invalid hints must not withdraw a
+        // valid exact view; a completed maintenance cycle replaces the union.
+        if (slot.Additive)
+        {
+            if (_readback[0] != 0) return;
+            if (SnapshotReady) MergeAcceptedDemand(slot.X, slot.Y, slot.Z);
+        }
+
         bool ready = _readback[0] == 0;
         bool changed = SnapshotReady != ready || _x != slot.X || _y != slot.Y || _z != slot.Z;
         for (int i = 0; i < WordCount; i++)

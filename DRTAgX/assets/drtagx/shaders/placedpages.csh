@@ -20,6 +20,19 @@ uniform uint drtMemoDenseSourceRevision=1u;
 uniform uint drtMemoEvaluationRevision=1u;
 uniform uint drtPageVisibleFrames=64u;
 #ifdef DRT_PAGE_COLLECT
+bool drtQueueVisiblePage(uvec4 request) {
+    // Collection and scheduling are separate ordered dispatches: head cannot
+    // move during this append phase. One reservation admits every request that
+    // fits, independent of SIMD width or competing waves. The scheduler clamps
+    // the tail after overflow; rejected reservations never touch ring storage.
+    uint head=atomicAdd(queueControl.x,0u),tail=atomicAdd(queueControl.y,1u);
+    if(tail-head>=uint(DRT_PAGE_QUEUE_CAPACITY)) {
+        atomicAdd(queueControl.z,1u);return false;
+    }
+    requests[tail&uint(DRT_PAGE_QUEUE_CAPACITY-1)]=request;return true;
+}
+#endif
+#ifdef DRT_PAGE_COLLECT
 layout(local_size_x=8,local_size_y=8) in;
 uniform sampler2D drtPageNormal;
 uniform ivec2 drtPageExtent;
@@ -43,7 +56,16 @@ void main() {
     if(any(greaterThanEqual(pixel,drtPageExtent)))return;
     int plane=texelFetch(drtReceiverPlane,pixel,0).r;
     if(plane==(-2147483647-1))return;
-    uint token=drtPlacedSurfaceNormalToken(texelFetch(drtPageNormal,pixel,0).w);
+    uint token;vec3 p;uvec2 support;
+    if(drtIsFoliagePlane(plane)) {
+        // Read the rest pose directly; intersecting the wind-bent screen ray
+        // with the rest plane would slide cached shadows as the card moves.
+        p=drtUnpackFoliagePosition(plane,texelFetch(drtReceiverBounds,pixel,0).rg,token,plane);
+        if(token==0u||dot(drtPlacedSurfaceNormalVector(token),drtPlacedSurfaceNormalVector(token))<=0.0)return;
+        token|=DRT_FOLIAGE_PAGE_TOKEN;
+        support=drtFoliagePageBounds(p,token);
+    } else {
+    token=drtPlacedSurfaceNormalToken(texelFetch(drtPageNormal,pixel,0).w);
     vec3 n=drtPlacedSurfaceNormalVector(token);if(token==0u||token>=4096u||dot(n,n)<=0.0)return;
     vec2 uv=(vec2(pixel)+0.5)/vec2(drtPageExtent);
     vec4 v=drtPageInverseProjection*vec4(uv*2.0-1.0,-1,1);
@@ -51,9 +73,10 @@ void main() {
     if(abs(denominator)<1e-8)return;
     float distance=(float(plane)/1024.0-dot(n,drtMemoCameraOffset))/denominator;
     if(distance<=0.0)return;
-    vec3 p=drtMemoCameraOffset+ray*distance;
+    p=drtMemoCameraOffset+ray*distance;
+    support=texelFetch(drtReceiverBounds,pixel,0).rg;
+    }
     if(!drtPageInfluenced(p))return;
-    uvec2 support=texelFetch(drtReceiverBounds,pixel,0).rg;
     if(all(equal(support,uvec2(0xffffffffu))))return;
     uvec4 key=drtPageKey(p,token,plane);uint hash=drtPageHash(key,support);
     int first=int(hash&uint(drtMemoCapacityMask))*4,slot=-1,victim=-1;
@@ -119,15 +142,9 @@ void main() {
         drtMemoPages[slot].bankMeta[0]=uvec4(0);drtMemoPages[slot].bankMeta[1]=uvec4(0);
     }
     drtMemoPages[slot].state.y=drtMemoFrame;
-    uint tail=atomicAdd(queueControl.y,0u);bool queued=false;
-    for(int attempt=0;attempt<4;++attempt) {
-        if(tail-atomicAdd(queueControl.x,0u)>=uint(DRT_PAGE_QUEUE_CAPACITY))break;
-        uint observed=atomicCompSwap(queueControl.y,tail,tail+1u);
-        if(observed==tail) {requests[tail&uint(DRT_PAGE_QUEUE_CAPACITY-1)]=uvec4(uint(slot),drtMemoGeneration,hash,0);queued=true;break;}
-        tail=observed;
-    }
-    if(!queued) {
-        atomicAdd(queueControl.z,1u);memoryBarrierBuffer();
+    if(!drtQueueVisiblePage(uvec4(uint(slot),drtMemoGeneration,hash,0))) {
+        // A full ring leaves this page retryable and preserves any complete bank.
+        memoryBarrierBuffer();
         atomicExchange(drtMemoPages[slot].state.x,drtMemoGeneration);
     }
 }
@@ -145,6 +162,9 @@ void main() {
     // Off-screen requests release only their lock; completed banks are retained.
     uint head=queueControl.x,tail=queueControl.y;
     uint count=min(tail-head,uint(DRT_PAGE_QUEUE_CAPACITY));
+    // Overflow reservations own no ring entry. Repair the monotonic tail at
+    // this dispatch boundary before compacting the valid contiguous prefix.
+    tail=head+count;queueControl.y=tail;
     uint limit=min(drtPageBudget,uint(DRT_PAGE_JOB_CAPACITY)),jobs=0u;
     for(uint i=0u;i<count;++i) {
         uint at=(head+i)&uint(DRT_PAGE_QUEUE_CAPACITY-1);uvec4 r=requests[at];
@@ -269,7 +289,11 @@ void main() {
             float planeDistance=dot(normal,q),facing=0.28+0.72*max(-planeDistance/max(distance,1e-5),0.0);
             float strength=drtPlacedCalibration[level].x*(1.0-distance/s.w)*(0.75*facing/(1.0+0.25*d2)+0.2);
             if(strength<0.0005)continue;
-            float visibility=drtStaticVisibility(q,normal,distance,planeDistance,int(c.w),-1,0.0);
+            // Foliage receives walls and solid terrain from either side of its
+            // immutable card; it remains absent from the static caster atlas.
+            float visibility=(pageKey.w&DRT_FOLIAGE_PAGE_TOKEN)!=0u ?
+                drtStaticTwoSidedVisibilityWithTolerance(q,normal,int(c.w),-1,0.0,0.02) :
+                drtStaticVisibility(q,normal,distance,planeDistance,int(c.w),-1,0.0);
             drtAddPlacedLight(sum,drtPageStyledRadiance(c.rgb,strength,visibility));
         }
         int at=bank*289+int(node);drtMemoPages[pageSlot].nodes[at].radianceCoverage=vec4(drtPlacedSumRadiance(sum),coverage);

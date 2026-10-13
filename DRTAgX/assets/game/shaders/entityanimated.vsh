@@ -2,7 +2,7 @@
 #extension GL_ARB_explicit_attrib_location: enable
 
 // SheyderMod: vendored engine entityanimated.vsh (animated entity vertex stage).
-// The entity-only light define below selects directional point-light mixing.
+// The entity-only light define below selects blocklight with placed directionality.
 
 layout(location = 0) in vec3 vertexPositionIn;
 layout(location = 1) in vec2 uvIn;
@@ -63,11 +63,15 @@ out vec4 gnormal;
 // Animated entities retain cheap unshadowed vertex lighting. They never sample
 // placed-light depth in their fragment stage, including the native OIT variant.
 #define DRT_FORWARD_PLACED_LIGHTS 1
-// Retain the existing animated material's authored facing response.
+// Keep native blocklight brightness/color; placed sources only shape its direction.
 #define DRT_ANIMATED_PLACED_FACING 1
-// Double directly light-facing local radiance, fading to the existing back-side
-// response. Shared point/placed loops reuse their existing normal/light dot.
-#define DRT_ANIMATED_POINT_FACING_GAIN 2.0
+// Native animated blocks sample one voxel for the whole model. Their renderer
+// scopes this diffuse calibration; mobs/hands and unlit previews default to 1.
+// Apply it before the separate emission/moving-light/night-vision additions.
+uniform float drtAnimatedBlockLightGain = 1.0;
+#define DRT_NATIVE_DIFFUSE_GAIN drtAnimatedBlockLightGain
+// Open doors/chests share this shader with creatures. Keep the ordinary local
+// light response so switching from a terrain mesh does not double facing light.
 #define DRT_DYNAMIC_NORMAL_VIEW (viewMatrix * vec4(normal, 0.0)).xyz
 #include fogandlight.vsh
 #include vertexwarp.vsh

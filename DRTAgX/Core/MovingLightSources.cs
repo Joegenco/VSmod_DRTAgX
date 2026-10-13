@@ -13,7 +13,10 @@ internal enum MovingLightKind
     Entity,
     Api,
     RightHand,
-    LeftHand
+    LeftHand,
+    RemoteRightHand,
+    RemoteLeftHand,
+    PlayerBody
 }
 
 // Owns primitive Before-stage snapshots, never native light records. Stable hand
@@ -45,6 +48,7 @@ internal sealed class MovingLightSources
     private Vec3f _rgb = new();
     private readonly ConditionalWeakTable<IPointLight, ApiId>.CreateValueCallback _createId;
     private readonly double[] _inverse = new double[16];
+    private readonly MovingPlayerLightAnchors _playerAnchors = new();
     private object? _world;
     private SystemRenderPlayerEffects? _effects;
 
@@ -115,15 +119,33 @@ internal sealed class MovingLightSources
             // Right hand, left hand, entities, then API lights retain the same
             // priority as Publish; later records cannot affect this frame.
             if (_count >= sourceLimit) break;
-            // Replace the player's combined hand record exactly once. Preserve
-            // intrinsic player light separately when the native base field emits.
-            byte[]? hsv = entity.EntityId == player.EntityId && (right || left) ? BaseLight(player) : entity.LightHsv;
-            if (hsv is not { Length: >= 3 } || hsv[2] == 0) continue;
+            if (entity.Pos.Dimension != player.Pos.Dimension) continue;
             double x = entity.Pos.X, y = entity.Pos.InternalY, z = entity.Pos.Z;
             double dx = x - _inverse[12], dy = y - _inverse[13], dz = z - _inverse[14];
             if (dx * dx + dy * dy + dz * dz > 120.0 * 120.0) continue;
+            bool splitHands = entity.EntityId == player.EntityId && (right || left);
+            if (entity is EntityPlayer remote && entity.EntityId != player.EntityId)
+            {
+                // Every player's merged native hand light needs the same split.
+                // Remote hands remain cube lights, never local eye projectors.
+                splitHands = AddHand(api, world, remote.RightHandItemSlot, MovingLightKind.RemoteRightHand,
+                    remote.EntityId);
+                if (_count < sourceLimit)
+                    splitHands |= AddHand(api, world, remote.LeftHandItemSlot, MovingLightKind.RemoteLeftHand,
+                        remote.EntityId);
+            }
+
+            if (_count >= sourceLimit) break;
+            // Do not add the combined hand record again. Without emitting hands,
+            // preserve native/modded body light and the native respawn glow.
+            byte[]? hsv = entity is EntityPlayer emittingPlayer && splitHands
+                ? BaseLight(emittingPlayer)
+                : entity.LightHsv;
+            if (hsv is not { Length: >= 3 } || hsv[2] == 0) continue;
             if (Convert(world, api, hsv))
-                Add(new Source(entity.EntityId, MovingLightKind.Entity, x, y, z, _rgb.X, _rgb.Y, _rgb.Z));
+                Add(new Source(entity.EntityId,
+                    entity is EntityPlayer ? MovingLightKind.PlayerBody : MovingLightKind.Entity,
+                    x, y, z, _rgb.X, _rgb.Y, _rgb.Z));
         }
 
         foreach (var light in apiLights)
@@ -193,6 +215,7 @@ internal sealed class MovingLightSources
         FirstPerson = api.World.Player.CameraMode == EnumCameraMode.FirstPerson;
         int count = Math.Min(_count, Math.Min(16, NativeLimit));
         var player = api.World.Player.Entity;
+        _playerAnchors.Begin();
         for (int i = 0; i < count; ++i)
         {
             var s = _sources[i];
@@ -214,7 +237,30 @@ internal sealed class MovingLightSources
             else
             {
                 double x = s.X, y = s.Y + .3, z = s.Z;
-                if (held)
+                if ((s.Kind is MovingLightKind.RemoteRightHand or MovingLightKind.RemoteLeftHand
+                        or MovingLightKind.PlayerBody) &&
+                    api.World.LoadedEntities.TryGetValue(s.Id, out var owner) && owner is EntityPlayer emitter)
+                {
+                    bool remoteHand = s.Kind is MovingLightKind.RemoteRightHand or MovingLightKind.RemoteLeftHand;
+                    if (remoteHand &&
+                        _playerAnchors.TryHand(api, emitter, s.Kind == MovingLightKind.RemoteRightHand, p))
+                    {
+                        c[0] = s.R;
+                        c[1] = s.G;
+                        c[2] = s.B;
+                        continue;
+                    }
+
+                    // Custom renderers/missing poses retain a body-relative fallback.
+                    // Wearable/native body emission must not originate at the feet.
+                    float remoteSide = remoteHand ? (s.Kind == MovingLightKind.RemoteLeftHand ? -.4f : .4f) : 0f;
+                    double sin = Math.Sin(emitter.BodyYaw), cos = Math.Cos(emitter.BodyYaw);
+                    double forward = remoteHand ? .8 : Math.Max(.2, emitter.SelectionBox?.XSize * .5 ?? .2);
+                    x = emitter.Pos.X - cos * remoteSide + sin * forward;
+                    y = emitter.Pos.InternalY + Math.Max(.2, emitter.LocalEyePos.Y - (remoteHand ? .2 : .35));
+                    z = emitter.Pos.Z + sin * remoteSide + cos * forward;
+                }
+                else if (held)
                 {
                     // Body yaw, not camera yaw: third-person orbiting must not
                     // rotate the light to the other side of the player's body.

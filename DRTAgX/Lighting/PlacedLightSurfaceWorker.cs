@@ -31,7 +31,8 @@ internal sealed class PlacedLightSurfaceWorker : IDisposable
     private uint _generation;
     private uint _visibleRefreshRevision;
 
-    private int _fullResolutionFrames;
+    private int _fullResolutionFrames, _revealFrames;
+    private readonly PlacedLightViewState _receiverView = new();
 
     // Four frames cover queue contention/retries while a 1,024-page bounded
     // worker drains the 4,096-request ring. This burst is semantic-edit only.
@@ -184,7 +185,14 @@ internal sealed class PlacedLightSurfaceWorker : IDisposable
             // The rotating 4x4 collector is useful during unchanged gameplay,
             // but can hide a tiny edited page for 15 frames. Cover every pixel
             // briefly after source edits or a coherent depth-map promotion.
-            var pixelStep = _fullResolutionFrames > 0 ? 1 : PlacedLightUpdateExperiment.PixelStep;
+            // A newly exposed face must not wait through the old 16-frame
+            // sparse phase cycle. Quarter-pixel collection during motion and
+            // its four-frame tail covers all phases quickly; settled frames
+            // keep the original cheap 1/16 collector and demand cadence.
+            if (_receiverView.Update(world.CurrentModelViewMatrixd, api.Render.CurrentProjectionMatrix))
+                _revealFrames = 4;
+            var pixelStep = _fullResolutionFrames > 0 ? 1 :
+                _revealFrames > 0 ? 2 : PlacedLightUpdateExperiment.PixelStep;
             GL.MemoryBarrier(MemoryBarrierFlags.ShaderStorageBarrierBit | MemoryBarrierFlags.TextureFetchBarrierBit);
             // No source influence means every collector invocation would reject
             // its receiver. Skip that screen scan, but still schedule/evaluate:
@@ -223,6 +231,7 @@ internal sealed class PlacedLightSurfaceWorker : IDisposable
             GL.MemoryBarrier(MemoryBarrierFlags.ShaderStorageBarrierBit);
             Dispatches++;
             if (_fullResolutionFrames > 0) --_fullResolutionFrames;
+            if (_revealFrames > 0) --_revealFrames;
             return true;
         }
         catch (Exception ex)
@@ -276,7 +285,8 @@ internal sealed class PlacedLightSurfaceWorker : IDisposable
         _collect = _schedule = _evaluate = null;
         _failed = false;
         _visibleRefreshRevision = 0;
-        _fullResolutionFrames = 0;
+        _fullResolutionFrames = _revealFrames = 0;
+        _receiverView.Reset();
         // Queued jobs contain receiver identity only, so a shader reload can
         // safely evaluate them against the next reconciled source snapshot.
     }

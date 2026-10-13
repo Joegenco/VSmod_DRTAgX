@@ -48,7 +48,7 @@ internal sealed class MovingLightShadowRenderer : IDisposable
     private int _previousTexture15, _previousSampler15;
     private bool _pending, _warned;
     private IndexedBufferState _uniform5;
-    private int _shadowProgram, _mvp, _origin, _atlas, _heldIndex, _camera, _excludeWind;
+    private int _shadowProgram, _mvp, _origin, _atlas, _heldIndex, _camera, _excludeWind, _terrainPass;
 
     private int _deferredProgram,
         _countLocation,
@@ -179,9 +179,11 @@ internal sealed class MovingLightShadowRenderer : IDisposable
                 _heldIndex = GL.GetUniformLocation(_shadowProgram, "drtHeldProjectionIndex");
                 _camera = GL.GetUniformLocation(_shadowProgram, "drtHeldCameraMatrix");
                 _excludeWind = GL.GetUniformLocation(_shadowProgram, "drtExcludeWindCasters");
+                _terrainPass = GL.GetUniformLocation(_shadowProgram, "drtShadowTerrainPass");
             }
 
-            if (_mvp < 0 || _origin < 0 || _atlas < 0 || _heldIndex < 0 || _camera < 0 || _excludeWind < 0)
+            if (_mvp < 0 || _origin < 0 || _atlas < 0 || _heldIndex < 0 || _camera < 0 || _excludeWind < 0 ||
+                _terrainPass < 0)
                 throw new InvalidOperationException("Moving-light shadow shader interface unavailable.");
             // This program belongs exclusively to this moving-light renderer.
             // Every consumed projection uniform is authored below, so reading
@@ -197,6 +199,10 @@ internal sealed class MovingLightShadowRenderer : IDisposable
             GL.Enable(EnableCap.DepthTest);
             GL.DepthFunc(DepthFunction.Less);
             GL.DepthMask(true);
+            // Keep blockers between the emitter and its projection near plane.
+            // Far-clamped fragments still fail Less against clear depth 1;
+            // the enclosing state guard restores native depth-clamp policy.
+            GL.Enable(EnableCap.DepthClamp);
             GL.Disable(EnableCap.Blend);
             GL.Disable(EnableCap.ScissorTest);
             GL.Disable(EnableCap.CullFace);
@@ -212,7 +218,7 @@ internal sealed class MovingLightShadowRenderer : IDisposable
             GL.Uniform1(_excludeWind, 1);
             float[] camera = api.Render.CameraMatrixOriginf, projection = api.Render.CurrentProjectionMatrix;
             GL.UniformMatrix4(_camera, 1, false, camera);
-            Casters.Begin(passes, atlases);
+            Casters.Begin(passes, atlases, _terrainPass);
             try
             {
                 for (int i = 0; i < count; ++i)

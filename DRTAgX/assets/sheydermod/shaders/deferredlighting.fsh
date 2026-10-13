@@ -200,6 +200,23 @@ void main(void)
     drtAuthoredPlaneValid = placedNormalToken && placedNativeToken > 0u &&
         placedNativeToken < 4096u && drtAuthoredReceiverPosition(placedNativeToken,drtAuthoredReceiverView);
 
+#if defined(DRT_MEMO_ONLY) && !defined(DRT_PERFORMANCE_NO_PLS)
+    if(drtFoliageReceiverEnabled!=0 && grassTag+foliageTag>0.5 && drtReceiverPlaneReady!=0 && drtMemoSourceCount>0) {
+        int foliagePlane=texelFetch(drtReceiverPlane,ivec2(gl_FragCoord.xy),0).r;
+        if(drtIsFoliagePlane(foliagePlane)) {
+            vec3 rest=drtUnpackFoliagePosition(foliagePlane,
+                texelFetch(drtReceiverBounds,ivec2(gl_FragCoord.xy),0).rg,placedNativeToken,drtAuthoredPlane);
+            placedNormal=drtPlacedSurfaceNormalVector(placedNativeToken);
+            drtAuthoredPlaneValid=placedNativeToken>0u && dot(placedNormal,placedNormal)>0.0;
+            placedNativeToken|=DRT_FOLIAGE_PAGE_TOKEN;
+            drtAuthoredBounds=drtFoliagePageBounds(rest,placedNativeToken);
+            // Only PLS consumes these anchored rest coordinates. Fog, sun and
+            // moving lights continue to use the visible wind-deformed depth.
+            drtFoliageRestReceiver=rest;
+        }
+    }
+#endif
+
     if (!drtAuthoredPlaneValid && grassTag + foliageTag < 0.5 && !placedPrepared) {
         // Unsupported models can have quantized or synthetic authored normals.
         // Recover their actual receiving plane without a pixel-area cutoff.
@@ -212,8 +229,8 @@ void main(void)
         }
     }
 
-    // Only wind foliage uses the unshadowed/additive local-light route. Static
-    // no-cull surfaces receive the solid terrain's shadowed maximum blend.
+    // Certified rest-pose foliage shares completed page lighting with terrain.
+    // Unsupported cards retain native voxel fallback without source traversal.
     drtDeferredRelight(albedo, blockBright, rawAlbedo, viewPos.xyz, nrm4.xyz, placedNormal,
         placedNativeToken, voxSun, actualVoxSun, glowVec.r, placedPrepared ? -1.0 : grassTag + foliageTag);
 

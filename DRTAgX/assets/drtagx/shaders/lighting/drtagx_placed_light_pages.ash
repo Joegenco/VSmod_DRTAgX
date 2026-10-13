@@ -1,6 +1,7 @@
 #ifndef DRT_PLACED_LIGHT_PAGES
 #define DRT_PLACED_LIGHT_PAGES
 #include drtagx_placed_surface_normal.ash
+#include drtagx_foliage_receiver.ash
 #ifndef DRT_MEMO_GRID_ENABLED
 #define DRT_MEMO_GRID_ENABLED 0
 #endif
@@ -48,6 +49,7 @@ uniform int drtReceiverPlaneReady=0;
 bool drtAuthoredPlaneValid=false;
 int drtAuthoredPlane=0;
 uvec2 drtAuthoredBounds=uvec2(0xffffffffu);
+vec3 drtFoliageRestReceiver=vec3(0.0);
 // Visibility remains a neutral compatibility field; nodes need no shadow mask.
 struct DrtPlacedMemoValue {vec4 radianceCoverage;vec4 selfLightEmitter;float visibility;};
 void drtClearPlacedMemoValue(out DrtPlacedMemoValue v) {v.radianceCoverage=vec4(0);v.selfLightEmitter=vec4(0);v.visibility=1.0;}
@@ -56,6 +58,14 @@ uint drtMemoHash(uvec4 k) {return drtMemoMix(k.x^drtMemoMix(k.y+0x9e3779b9u)^drt
 ivec3 drtMemoAxes(vec3 n) {
     vec3 a=abs(n);int m=a.x>=a.y&&a.x>=a.z?0:a.y>=a.z?1:2;
     return m==0?ivec3(1,2,0):m==1?ivec3(0,2,1):ivec3(0,1,2);
+}
+uvec2 drtFoliagePageBounds(vec3 p,uint token) {
+    // A non-casting card can share its light field across its one-block plane
+    // brick. No current wind silhouette, alpha texel or camera enters the key.
+    ivec3 a=drtMemoAxes(drtPlacedSurfaceNormalVector(token));
+    ivec2 lo=ivec2(floor(vec2(p[a.x],p[a.y])))*16;
+    uvec4 b=uvec4(ivec4(lo,lo+16))&uvec4(65535u);
+    return uvec2(b.x|(b.y<<16u),b.z|(b.w<<16u));
 }
 bool drtMemoNativeNormal(uint token,out vec3 n) {
     n=token<4096u?drtPlacedSurfaceNormalVector(token):vec3(0);float l=dot(n,n);
@@ -133,8 +143,10 @@ int drtFindPage(uvec4 k,uvec2 support) {
 int drtQueryPlacedMemo(vec3 relative,vec3 normal,uint token,int mode,bool ignored,out DrtPlacedMemoValue v) {
     drtClearPlacedMemoValue(v);
     if(drtMemoEnabled==0)return DRT_MEMO_LEGACY;
-    if(drtMemoEnabled!=1||!drtAuthoredPlaneValid||mode!=0||token==0u||token>=4096u)return DRT_MEMO_PENDING;
-    vec3 p=relative+drtMemoCameraOffset;
+    if(drtMemoEnabled!=1||!drtAuthoredPlaneValid||mode!=0||(token&4095u)==0u||token>=8192u)return DRT_MEMO_PENDING;
+    // Rest coordinates already use the immutable cache anchor. Avoid a view
+    // rotation round-trip which could flip exact integer card edges between keys.
+    vec3 p=(token&DRT_FOLIAGE_PAGE_TOKEN)!=0u ? drtFoliageRestReceiver : relative+drtMemoCameraOffset;
     // Removed sources cannot leave stale illumination outside current true
     // influence. Missing depth remains present in this source-truth envelope.
     if(!drtMemoInfluenced(p))return DRT_MEMO_PENDING;
@@ -144,17 +156,26 @@ int drtQueryPlacedMemo(vec3 relative,vec3 normal,uint token,int mode,bool ignore
     if(slot<0||drtMemoPages[slot].state.z==0u||drtMemoPages[slot].state.z==3u)return DRT_MEMO_PENDING;
     int bank=int(drtMemoPages[slot].state.z)-1;ivec3 a=drtMemoAxes(drtPlacedSurfaceNormalVector(token));
     vec2 tangent=vec2(p[a.x],p[a.y]);
-    vec4 bounds=drtPageBounds(k,drtAuthoredBounds);
     if(DRT_MEMO_GRID_ENABLED!=0)tangent=(floor(tangent*32.0)+0.5)/32.0;
+    ivec2 lo;vec2 phase;
+    if((token&DRT_FOLIAGE_PAGE_TOKEN)!=0u) {
+        // Wind's support is exactly this unit brick: no finite mesh boundary
+        // can clamp a node. This is algebraically the same interpolation as
+        // below, without four-coordinate modular unwraps, divisions and clamps.
+        vec2 grid=fract(tangent)*DRT_PAGE_NODES_PER_BLOCK;
+        lo=ivec2(grid);phase=fract(grid);
+    } else {
+    vec4 bounds=drtPageBounds(k,drtAuthoredBounds);
     tangent=clamp(tangent,bounds.xy,bounds.zw);
     ivec2 anchor=ivec2(drtMemoAnchorCells[a.x],drtMemoAnchorCells[a.y])>>DRT_PAGE_ANCHOR_SHIFT;
     vec2 grid=clamp((tangent-vec2(ivec2(k.xy)-anchor)*DRT_PAGE_BLOCKS)*DRT_PAGE_NODES_PER_BLOCK,vec2(0),vec2(16));
-    ivec2 lo=min(ivec2(floor(grid)),ivec2(15));
+    lo=min(ivec2(floor(grid)),ivec2(15));
     vec2 base=vec2(ivec2(k.xy)-anchor)*DRT_PAGE_BLOCKS;
     vec2 low=clamp(base+vec2(lo)/DRT_PAGE_NODES_PER_BLOCK,bounds.xy,bounds.zw),high=clamp(base+vec2(lo+1)/DRT_PAGE_NODES_PER_BLOCK,bounds.xy,bounds.zw);
     // Recompute weights after boundary clamping; a half-cell chisel edge must
     // not bias interpolation toward an off-surface lattice sample.
-    vec2 phase=clamp((tangent-low)/max(high-low,vec2(1e-8)),vec2(0),vec2(1));
+    phase=clamp((tangent-low)/max(high-low,vec2(1e-8)),vec2(0),vec2(1));
+    }
     bool upper=phase.x+phase.y>1.0;
     vec3 weights=upper?vec3(phase.x+phase.y-1.0,1.0-phase.x,1.0-phase.y):vec3(1.0-phase.x-phase.y,phase.x,phase.y);
     uint age=drtMemoAge(drtMemoPages[slot].bankMeta[bank].y);

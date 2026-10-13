@@ -25,7 +25,7 @@ void drtDeferredRelight(inout vec3 albedo, inout float blockBright, vec3 rawAlbe
         // Wind PLS was evaluated before G-buffer fill at the rest pose. Do not
         // sample its cached depth again using the current wind-deformed depth.
         local = albedo;
-    } else if (grassTag > 0.5) {
+    } else if (grassTag > 0.5 && (!drtAuthoredPlaneValid || weight<=0.0)) {
         // The caller supplies wind foliage, including triangles with fixed
         // roots and moving tips. Static no-cull surfaces use the solid route.
         float voxelFacing = 1.0;

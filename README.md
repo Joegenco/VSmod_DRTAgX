@@ -1,14 +1,15 @@
-# DRTAgX 2.1.0
+# DRTAgX 2.1.1
 
 Client-side graphics mod for **Vintage Story 1.22.7**, by **Joegen**.
 It builds on the game's rendering and SheyderMod rather than replacing the engine.
 
 - AgX tone mapping, HDR bloom and automatic exposure.
-- Atmospheric sky, ambient lighting, clouds, fog and underwater light absorption.
+- Atmospheric sky, ambient lighting, clouds, room-aware fog and underwater light absorption.
 - Cached placed-light lighting and shadows, prioritizing visible surfaces and local edits.
 - Shadows from held, dropped and moving lights, including animated entities.
 - Lighting fixes for foliage, particles, transparent materials and night vision.
-- Optional compatibility with ChunkLod, Distant Vistas, GhostChunks, SMAA and RainCurtains.
+- Optional compatibility with ChunkLod, Distant Vistas, GhostChunks, SMAA, RainCurtains,
+  AstraTerra, AstraExtera and VS Roofing.
 
 Install DRTAgX alongside **SheyderMod 1.1.3**. Press **O** for DRTAgX settings and
 **F8** for Sheyder's other effects. Deferred rendering stays enabled in normal play.

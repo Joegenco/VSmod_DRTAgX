@@ -29,7 +29,10 @@ layout(std140) uniform DrtAtmosphere {
     vec4 drtAmbientResolved; // GPU E/pi plus solar-region chroma; w = same-frame result ready.
     vec4 drtScatteringFrame; // Native daily aerosol density/height, ozone and twilight spread.
     vec4 drtSunGridFrame;    // Fractional absolute camera xyz, w = grid enabled and phase valid.
-    vec4 drtFogEnvironment;  // Level-one table radiance, camera shelter, optional LOD endpoint, valid snapshot.
+    vec4 drtFogEnvironment;  // Live sunlight threshold, camera exposure, optional LOD endpoint, valid snapshot.
+    vec4 drtRoomMin;         // Camera-relative inclusive room corner; w = valid sheltered room.
+    vec4 drtRoomMax;         // Exclusive corner; w = rectangular (skip voxel traversal).
+    uvec4 drtRoomVoxels[192]; // Native room bitset: X fastest, then Z, then Y. At most 29^3 cells.
 };
 
 const float DRT_AIR_FOG_STRENGTH = 1.0 / 2.0;
@@ -41,6 +44,64 @@ struct DrtFogTransport { vec3 transmittance; vec3 scatter; };
 
 DrtFogTransport drtClearTransport() {
     return DrtFogTransport(vec3(1.0), vec3(0.0));
+}
+
+// Native rooms are cached on the CPU. Ordinary rectangular rooms need only a
+// ray/box exit; the exact bitset prevents concave rooms from clearing outdoor
+// air in their bounding-box corners. This adds no texture or render pass.
+bool drtRoomContainsCell(ivec3 cell, ivec3 size) {
+    if (any(lessThan(cell, ivec3(0))) || any(greaterThanEqual(cell, size))) return false;
+    int index = (cell.y * size.z + cell.z) * size.x + cell.x;
+    uint bits = drtRoomVoxels[index >> 7][(index >> 5) & 3];
+    return (bits & (1u << uint(index & 31))) != 0u;
+}
+
+float drtRoomExitDistance(vec3 endpoint) {
+    float distance = length(endpoint);
+    if (distance < 0.0001) return 0.0;
+    vec3 direction = endpoint / distance;
+    // Parallel axes have no exit. Avoid 0*infinity at a wall/voxel boundary.
+    vec3 inverse = mix(vec3(-1.0), vec3(1.0), greaterThanEqual(direction, vec3(0.0)))
+        / max(abs(direction), vec3(0.0000001));
+    vec3 farAxis = max(drtRoomMin.xyz * inverse, drtRoomMax.xyz * inverse);
+    farAxis = mix(farAxis, vec3(1e20), lessThan(abs(direction), vec3(0.0000001)));
+    float boxExit = max(0.0, min(farAxis.x, min(farAxis.y, farAxis.z)));
+    // Three centimetres includes the visible inside face at the native air-cell
+    // boundary without introducing a haze seam on walls, doors or windows.
+    if (drtRoomMax.w > 0.5) return boxExit + 0.03;
+
+    ivec3 size = ivec3(floor(drtRoomMax.xyz - drtRoomMin.xyz + vec3(0.5)));
+    ivec3 cell = ivec3(floor(-drtRoomMin.xyz));
+    if (!drtRoomContainsCell(cell, size)) return 0.0;
+    ivec3 stepCell = ivec3(sign(direction));
+    vec3 nextBoundary = drtRoomMin.xyz + vec3(cell) + step(vec3(0.0), direction);
+    vec3 nextT = nextBoundary * inverse;
+    nextT = mix(nextT, vec3(1e20), equal(stepCell, ivec3(0)));
+    vec3 deltaT = abs(inverse);
+    float limit = min(distance, boxExit);
+    // A native room fits a 29-cell span on each axis: a straight ray crosses
+    // fewer than 87 cell boundaries. Only irregular rooms take this path.
+    for (int i = 0; i < 90; ++i) {
+        float next = min(nextT.x, min(nextT.y, nextT.z));
+        if (next >= limit) return limit + 0.03;
+        bvec3 crossed = lessThanEqual(nextT, vec3(next + 0.000001));
+        cell += ivec3(crossed) * stepCell;
+        nextT += vec3(crossed) * deltaT;
+        if (!drtRoomContainsCell(cell, size)) return max(next, 0.0) + 0.03;
+    }
+    return 0.0; // An invalid mask must never erase outdoor weather.
+}
+
+// Camera-collinear air segment: retain only the portion beyond the current
+// sheltered room. A closed room is clear, while the view through its window
+// still has the correct exterior path length, independent of voxel sunlight.
+vec2 drtFogOutdoorInterval(vec3 start, vec3 end) {
+    if (drtRoomMin.w < 0.5) return vec2(0.0, 1.0);
+    float distance = length(end - start);
+    if (distance < 0.0001) return vec2(1.0);
+    float clearDistance = drtRoomExitDistance(end);
+    float from = clamp((clearDistance - length(start)) / distance, 0.0, 1.0);
+    return vec2(from, 1.0);
 }
 
 // Near segment A followed by far segment B: camera receives A.S + A.T * B.S.
@@ -102,12 +163,15 @@ float drtAirOpticalDepth(vec3 start, vec3 end) {
 
 float drtFogExposure(float sunlight) {
     // Sunlight is normalized live-table radiance, never an sRGB color or raw
-    // level/31 fraction. C# publishes the actual table value for level one.
+    // level/31 fraction. This fallback protects caves outside detected rooms.
     float full = drtFogEnvironment.w > 0.5 ? max(drtFogEnvironment.x, 0.000001) : 1.0;
     return smoothstep(0.0, full, max(sunlight, 0.0));
 }
 
 float drtSurfaceFogExposure(vec3 worldPos, float sunlight) {
+    // The room interval handles enclosure. Do not dim outdoor fog seen through
+    // a window merely because the indoor camera or receiver has low sunlight.
+    if (drtRoomMin.w > 0.5) return 1.0;
     float local = drtFogExposure(sunlight);
     float camera = drtFogEnvironment.w > 0.5 ? clamp(drtFogEnvironment.y, 0.0, 1.0) : 0.0;
     // A distant dark face still has outdoor air in front of it. Restore that
@@ -179,13 +243,53 @@ float drtWorldFogSegmentTransmittance(vec3 start, vec3 end, float exposure) {
     return pow(drtWorldFogSegmentTransmittance(start, end), exposure);
 }
 
+// Bound the complete dry-weather column, not each ingredient independently.
+// sigma=.20 leaves 67% of scene contrast at two blocks and 13.5% at ten,
+// including extreme valley mist. Ordinary weaker weather keeps its exact curve.
+const float DRT_MAX_WEATHER_EXTINCTION = 0.20;
+
+float drtWeatherOpticalDepth(vec3 p, bool minimumFog) {
+    float distance = length(p);
+    if (distance < 0.0001) return 0.0;
+    float tau = drtAirOpticalDepth(vec3(0.0), p)
+        - log(max(drtWorldFogTransmittance(distance), 0.000001));
+    if (minimumFog) {
+        vec4 density = drtAtmosphereView.z > 0.7 ? drtAirDensity : drtFogDensity;
+        float opacity = drtAirFogStrength(density.x) * clamp(density.y, 0.0, 1.0);
+        tau -= log(max(1.0 - opacity, 0.000001));
+    }
+    return min(max(tau, 0.0), DRT_MAX_WEATHER_EXTINCTION * distance);
+}
+
+float drtWeatherSegmentOpticalDepth(vec3 start, vec3 end, bool minimumFog) {
+    // Difference of cumulative columns preserves exact camera-ray composition
+    // through water interfaces and froxel slices; per-segment clamps do not.
+    float tau = max(drtWeatherOpticalDepth(end, minimumFog)
+        - drtWeatherOpticalDepth(start, minimumFog), 0.0);
+    // A room's clear prefix is excluded from the available extinction budget.
+    // Otherwise a steep mist layer could spend the room's unused budget in the
+    // first two outdoor blocks. Only sheltered paths need this additional cap.
+    return drtRoomMin.w > 0.5 ? min(tau, DRT_MAX_WEATHER_EXTINCTION * length(end - start)) : tau;
+}
+
+float drtWeatherTransmittance(vec3 start, vec3 end, bool minimumFog, float exposure) {
+    if (length(end - start) < 0.0001) return 1.0;
+    float tau = drtWeatherSegmentOpticalDepth(start, end, minimumFog);
+    return min(exp(-min(tau * max(exposure, 0.0), 80.0)), 1.0 - DRT_MIN_FOG_OPACITY);
+}
+
+float drtWeatherTransmittance(vec3 start, vec3 end, bool minimumFog) {
+    return drtWeatherTransmittance(start, end, minimumFog, 1.0);
+}
+
 // Used by vertex-only native paths and fog metadata, never to fog packed buffers.
 float drtFogOpacity(vec3 worldPos, bool boundary, float sunlight) {
     if (drtFogColor.w < 0.5) return DRT_MIN_FOG_OPACITY;
     vec3 p = worldPos - drtAtmosphereCamera.xyz;
     float exposure = drtSurfaceFogExposure(worldPos, sunlight);
-    float t = drtAirTransmittance(vec3(0.0), p, true, exposure)
-        * drtWorldFogSegmentTransmittance(vec3(0.0), p, exposure);
+    vec2 outdoor = drtFogOutdoorInterval(vec3(0.0), p);
+    if (outdoor.x >= outdoor.y) return DRT_MIN_FOG_OPACITY;
+    float t = drtWeatherTransmittance(p * outdoor.x, p * outdoor.y, true, exposure);
     if (boundary) t *= mix(1.0, drtBoundaryTransmittance(length(p.xz)), exposure);
     return max(DRT_MIN_FOG_OPACITY, 1.0 - t);
 }

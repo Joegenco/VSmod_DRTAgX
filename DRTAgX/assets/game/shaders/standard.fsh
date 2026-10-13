@@ -151,6 +151,27 @@ void drtComposeSunSprite(vec4 texColor) {
     outGNormal = vec4(0.0);
 #endif
 }
+
+void drtComposeAstraSprite(vec4 texColor) {
+    // These meshes live on the provider's eye-centered sky sphere. Surface fog
+    // would mistake that small modeling radius for a nearby world receiver.
+    vec3 direction = normalize(worldPos.xyz - drtAtmosphereCamera.xyz);
+    vec3 transmission = drtAtmosphereFlags.x > 0.5
+        ? drtSkyMediumTransport(direction).transmittance : vec3(1.0);
+    float visibility = max(max(transmission.r, transmission.g), transmission.b);
+    // Both native Standard and Glow blends use source alpha. Put extinction in
+    // coverage, keeping spectral tint in RGB: opaque dark lunar/planetary limbs
+    // then reveal the existing sky in fog instead of cutting black rectangles.
+    // The provider owns phase, daylight fade, tint and blend choice. Never add
+    // another sky background or the sun's gain to its additive stars/galaxy.
+    outColor = vec4(texColor.rgb * transmission / max(visibility, 0.00001),
+        texColor.a * visibility);
+    outGlow = vec4(0.0, 0.0, 0.0, outColor.a);
+#if SSAOLEVEL > 0
+    outGPosition = vec4(0.0);
+    outGNormal = vec4(0.0);
+#endif
+}
 #endif
 
 void main() {
@@ -159,7 +180,13 @@ void main() {
     vec3 drtReceiverNormal=drtSunPrimitiveNormal(worldPos.xyz-drtAtmosphereCamera.xyz,normal);
 #endif
 #ifdef DRT_FOG_TRANSPORT
-    if (drtSunSprite != 0 && drtAtmosphereFlags.x > 0.5) {
+    if (drtSunSprite == 2) {
+        vec4 texColor = texture(tex, uv) * color;
+        if (texColor.a < alphaTest) discard;
+        drtComposeAstraSprite(texColor);
+        return;
+    }
+    if (drtSunSprite == 1 && drtAtmosphereFlags.x > 0.5) {
         vec4 texColor = texture(tex, uv) * color;
         if (texColor.a < alphaTest) discard;
         drtComposeSunSprite(texColor);

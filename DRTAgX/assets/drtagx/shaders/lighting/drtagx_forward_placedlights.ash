@@ -25,9 +25,15 @@ vec3 drtForwardPlacedLocal(vec3 receiverView, vec3 normalView, vec3 voxel,
     if (weight <= 0.0) return voxel; // Bright daylight/emissive tips need no lamp loop.
     float n2 = dot(normalView, normalView);
     vec3 n = n2 > 1e-6 ? normalView * inversesqrt(n2) : vec3(0.0);
+#ifdef DRT_ANIMATED_PLACED_FACING
+    // Animated models use native blocklight for brightness and color. Placed
+    // sources supply only an energy-weighted direction, never extra radiance.
+    vec2 facingEnergy = vec2(0.0); // Shaded and head-on energy, respectively.
+#else
     DrtPlacedLightSum lights;
     drtClearPlacedSum(lights);
     vec3 pairRadiance = vec3(0.0);
+#endif
     float coverage = 0.0, pairCoverage = 0.0;
     for (int i = 0; i < min(drtEntityPlacedCount, DRT_LIGHT_BUDGET + 1); ++i) {
         vec3 delta = drtEntityPlacedSources[i].xyz - receiverView;
@@ -40,24 +46,16 @@ vec3 drtForwardPlacedLocal(vec3 receiverView, vec3 normalView, vec3 voxel,
         bool replacementPair = (drtEntityPlacedPairMask & (1 << i)) != 0;
         int level = clamp(int(drtEntityPlacedColors[i].w), 0, 31);
 #ifdef DRT_ANIMATED_PLACED_FACING
-        // Match current terrain's diffuse response without shadow sampling.
-        // The independent shoulder keeps away faces lit instead of suppressing
-        // the entire contribution to the old three-percent facing floor.
+        // Retain terrain's diffuse response and isotropic shoulder, normalized
+        // by its head-on energy so PLS cannot brighten the native blocklight.
         float towardsLight = n2 > 1e-6 && d > 1e-5 ?
             max(dot(n, delta / d), 0.0) : 0.0;
         float facing = n2 > 1e-6 && d > 1e-5 ? 0.28 + 0.72 * towardsLight : 1.0;
-        float strength = drtPlacedCalibration[level].x * (1.0 - d / radius) *
-            (0.75 * facing / (1.0 + 0.25 * d2) + 0.2);
-#ifdef DRT_ANIMATED_POINT_FACING_GAIN
-        // Boost this lamp's facing contribution before overlap blending. Voxel
-        // fill, native emission and sunlight remain independently composed.
-        strength *= 1.0 + (DRT_ANIMATED_POINT_FACING_GAIN - 1.0) * clamp(towardsLight, 0.0, 1.0);
-#endif
-        vec3 contribution = drtEntityPlacedColors[i].rgb * strength * fade;
-        float energy = max(dot(contribution, DRT_LUMINANCE), 0.0);
-        if (energy <= 0.0) continue; // Empty/faded records preserve voxel fallback.
-        if (replacementPair) pairRadiance += contribution;
-        else drtAddPlacedLight(lights, contribution);
+        float diffuse = 0.75 / (1.0 + 0.25 * d2);
+        float energy = dot(drtEntityPlacedColors[i].rgb, DRT_LUMINANCE) *
+            drtPlacedCalibration[level].x * (1.0 - d / radius) * fade;
+        if (!(energy > 0.0) || isnan(energy) || isinf(energy)) continue;
+        facingEnergy += energy * vec2(diffuse * facing + 0.2, diffuse + 0.2);
 #else
         float facing = n2 > 1e-6 && d > 1e-5 ?
             0.28 + 0.72 * max(dot(n, delta / d), 0.0) : 1.0;
@@ -76,21 +74,18 @@ vec3 drtForwardPlacedLocal(vec3 receiverView, vec3 normalView, vec3 voxel,
     // Old/new fades divide one source's coverage. Sum that pair before the
     // voxel handoff so its midpoint cannot expose extra unoccluded voxel light.
     coverage = max(coverage, min(pairCoverage, 1.0));
+#ifdef DRT_ANIMATED_PLACED_FACING
+    if (!(facingEnergy.y > 0.0) || any(isnan(facingEnergy)) || any(isinf(facingEnergy))) return voxel;
+    // A sole source's fade cancels in this ratio, then coverage applies it once.
+    // Replacement-pair moments add before normalization, matching their summed
+    // coverage. Missing sources retain native light; black voxel light stays black.
+    float directionality = clamp(facingEnergy.x / facingEnergy.y, 0.0, 1.0);
+    return voxel * mix(1.0, directionality, coverage * weight);
+#else
     // The old/incoming records crossfade one cache slot, rather than adding a
     // second peak and causing a brightness dip during replacement.
     drtAddPlacedLight(lights, pairRadiance);
     vec3 direct = drtPlacedSumRadiance(lights);
-#ifdef DRT_ANIMATED_PLACED_FACING
-    // Full PLS coverage retains half the native voxel light on every side.
-    // Coverage and the existing envelope fade smoothly back to native lighting;
-    // sun, emission and moving light are added separately by the caller.
-    // Animated receivers intentionally use unshadowed PLS. Its RGB must not
-    // follow transient native flood-light values during nearby block updates.
-    // The shared sum applies global half-strength PLS once. Animated models
-    // use a further 0.66 RGB gain; their half-voxel handoff stays unchanged.
-    return voxel * (1.0 - 0.5 * coverage * weight) +
-        direct * (0.66 * weight);
-#else
     // Other legacy forward materials retain native voxel occlusion so an
     // unoccluded source cannot light a sealed cave through the terrain.
     vec3 voxelGate = clamp(voxel * 32.0, vec3(0.0), vec3(1.0));

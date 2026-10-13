@@ -33,6 +33,10 @@ uniform ivec2 dimensions;
 // Nine integer partitions preserve full viewport projection coordinates. Their
 // world-space scratch is cleared once and published only after all nine tiles.
 uniform ivec2 pixelOrigin, pixelExtent;
+// Exact maintenance uses stride1. Priority reveal snapshots spread a rotating
+// stride4 phase over the complete viewport, reusing the same bounded scratch.
+uniform int pixelStride=1;
+uniform ivec2 pixelPhase=ivec2(0);
 uniform mat4 inverseProjection;
 uniform mat4 inverseViewRotation;
 uniform vec3 cameraInGrid;
@@ -78,12 +82,12 @@ void main()
     { minima[lane * 3u + axis] = 0u; maxima[lane * 3u + axis] = 0u; }
     if (lane == 0u) { invalidPixels = 0u; outsidePixels = 0u; receiverPixels = 0u; }
     barrier();
-    ivec2 first = pixelOrigin + ivec2(gl_WorkGroupID.xy) * 16;
+    ivec2 first = pixelOrigin + ivec2(gl_WorkGroupID.xy) * (16 * pixelStride);
     uint invalid = 0u, outside = 0u, receivers = 0u, pending = EMPTY;
     uvec3 pendingLo = uvec3(128u), pendingHi = uvec3(0u);
     for (uint pixel = lane; pixel < 256u; pixel += 64u)
     {
-        ivec2 xy = first + ivec2(int(pixel & 15u), int(pixel >> 4u));
+        ivec2 xy = first + ivec2(int(pixel & 15u), int(pixel >> 4u)) * pixelStride + pixelPhase;
         if (any(greaterThanEqual(xy, dimensions)) || any(greaterThanEqual(xy, pixelOrigin + pixelExtent))) continue;
         float depth = texelFetch(terrainDepth, xy, 0).r;
         if (depth == 1.0) continue;

@@ -42,7 +42,7 @@ vec3 drtClearSkyRadiance(vec3 direction) {
 float drtAirCelestialVisibility(vec3 direction) {
     if (drtFogColor.w < 0.5) return 1.0;
     vec3 endpoint = normalize(direction) * 8000.0;
-    return drtAirTransmittance(vec3(0.0), endpoint, true) * drtWorldFogTransmittance(8000.0);
+    return drtWeatherTransmittance(vec3(0.0), endpoint, true);
 }
 
 float drtCelestialVisibility(vec3 direction) {
@@ -69,7 +69,15 @@ vec3 drtWeatherRadiance(vec3 direction) {
     // The artistic tint can extrapolate beyond one; bound negative radiance so
     // the straight-alpha overlay and celestial background remain identical.
     vec3 weather = max(mix(max(color, vec3(0.0)), clear * (fogLuma / max(skyLuma, 0.0001)), tint), vec3(0.0));
-    return weather * DRT_SKY_EXPOSURE * DRT_SKY_DISPLAY_GAIN;
+    // Display-sky exposure is useful for ordinary haze, but up to six times
+    // native radiance turns opaque valley mist into a white wall. Only dense
+    // weather loses that display boost; nighttime fog is never brightened.
+    // Include flat-plane penetration, minimum opacity and optional WorldFog:
+    // dense haze can exist even when ordinary native fog density is near zero.
+    float nearExtinction = drtWeatherOpticalDepth(vec3(0.0, 0.0, 10.0), true) * 0.1;
+    float dense = smoothstep(0.06, DRT_MAX_WEATHER_EXTINCTION, nearExtinction);
+    float display = DRT_SKY_EXPOSURE * DRT_SKY_DISPLAY_GAIN;
+    return weather * mix(display, min(display, 1.0), dense);
 }
 
 vec3 drtSkyBackground(vec3 direction) {
@@ -81,7 +89,8 @@ vec3 drtFogScatterColor(vec3 direction) {
 }
 
 float drtCumulativeScatterWeight(vec3 p) {
-    float t = drtAirTransmittance(vec3(0.0), p, false) * drtWorldFogTransmittance(length(p));
+    vec2 outdoor = drtFogOutdoorInterval(vec3(0.0), p);
+    float t = drtWeatherTransmittance(p * outdoor.x, p * outdoor.y, false);
     return 1.0 - t;
 }
 
@@ -103,13 +112,10 @@ float drtVolumeVisibility(vec3 start, vec3 end) {
     return farW - nearW > 0.00001 ? clamp((farV * farW - nearV * nearW) / (farW - nearW), 0.0, 1.0) : 1.0;
 }
 
-DrtFogTransport drtAirTransport(vec3 start, vec3 end, bool minimumFog, float exposure) {
+DrtFogTransport drtExposedAirTransport(vec3 start, vec3 end, bool minimumFog, float exposure) {
     float distance = length(end - start);
     if (distance < 0.0001) return drtClearTransport();
-    float t = drtAirTransmittance(start, end, minimumFog, exposure);
-    // WorldFog is a single bounded extinction term. For split media, use the
-    // ratio of endpoint transmittances, so its fade start stays camera-relative.
-    t *= drtWorldFogSegmentTransmittance(start, end, exposure);
+    float t = drtWeatherTransmittance(start, end, minimumFog, exposure);
     vec3 color = drtFogScatterColor(end / max(length(end), 0.0001));
     // Shafts only shade directional contrast. Transmission bounds that contrast
     // so opaque ordinary/minimum/flat/WorldFog converges to the weather sky,
@@ -120,6 +126,12 @@ DrtFogTransport drtAirTransport(vec3 start, vec3 end, bool minimumFog, float exp
     return DrtFogTransport(vec3(t), color * (1.0 - t));
 }
 
+DrtFogTransport drtAirTransport(vec3 start, vec3 end, bool minimumFog, float exposure) {
+    vec2 outdoor = drtFogOutdoorInterval(start, end);
+    if (outdoor.x >= outdoor.y) return drtClearTransport();
+    return drtExposedAirTransport(mix(start, end, outdoor.x), mix(start, end, outdoor.y), minimumFog, exposure);
+}
+
 DrtFogTransport drtAirTransport(vec3 start, vec3 end, bool minimumFog) {
     return drtAirTransport(start, end, minimumFog, 1.0);
 }
@@ -127,7 +139,9 @@ DrtFogTransport drtAirTransport(vec3 start, vec3 end, bool minimumFog) {
 DrtFogTransport drtSurfaceAirTransport(vec3 worldPos, bool boundary, float exposure) {
     if (drtFogColor.w < 0.5) return drtClearTransport();
     vec3 p = worldPos - drtAtmosphereCamera.xyz;
-    DrtFogTransport fog = drtAirTransport(vec3(0.0), p, true, exposure);
+    vec2 outdoor = drtFogOutdoorInterval(vec3(0.0), p);
+    if (outdoor.x >= outdoor.y) return drtClearTransport();
+    DrtFogTransport fog = drtExposedAirTransport(p * outdoor.x, p * outdoor.y, true, exposure);
     if (boundary && length(p) > 0.0001) {
         float t = mix(1.0, drtBoundaryTransmittance(length(p.xz)), exposure);
         fog.transmittance *= t;

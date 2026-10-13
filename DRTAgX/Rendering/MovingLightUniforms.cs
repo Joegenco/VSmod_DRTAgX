@@ -60,8 +60,7 @@ internal sealed class MovingLightUniforms
             Array.Copy(positions[i], 0, _positionData, i * 3, 3);
             Array.Copy(colors[i], 0, _colorData, i * 3, 3);
             float[] c = colors[i];
-            float peak = Math.Max(c[0], Math.Max(c[1], c[2]));
-            for (int j = 0; j < 3; ++j) _prepared[i * 4 + j] = peak > 1e-6f ? Math.Max(c[j] / peak, 0) : 0;
+            PrepareRadiance(c, _prepared, i * 4);
             // Lighting must fade out at the same radius used by its shadow map.
             _prepared[i * 4 + 3] = MovingLightShadowRenderer.Reach(c);
         }
@@ -77,5 +76,15 @@ internal sealed class MovingLightUniforms
             GL.ProgramUniform3(_deferred, _colors, count, _colorData);
             GL.ProgramUniform4(_deferred, _radiance, count, _prepared);
         }
+    }
+
+    internal static void PrepareRadiance(float[] color, float[] result, int offset)
+    {
+        float peak = Math.Max(color[0], Math.Max(color[1], color[2]));
+        // Preserve the established full lamp scale, but never amplify a tiny
+        // source to unit radiance. A level-1 amulet is not a level-14 torch.
+        float divisor = Math.Max(1f, peak);
+        for (int j = 0; j < 3; ++j)
+            result[offset + j] = float.IsFinite(peak) && peak > 1e-6f ? Math.Max(color[j] / divisor, 0) : 0;
     }
 }

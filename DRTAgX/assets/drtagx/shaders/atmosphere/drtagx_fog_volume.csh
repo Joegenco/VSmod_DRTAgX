@@ -19,11 +19,12 @@ void main() {
     for (int z = 0; z < size.z; ++z) {
         float distance = exp((float(z) + 0.5) / float(size.z) * log(1.0 + drtAtmosphereFlags.z)) - 1.0;
         vec3 start = direction * previousDistance, end = direction * distance;
-        float deltaTau = drtAirOpticalDepth(start, end)
-            - log(max(drtWorldFogSegmentTransmittance(start, end), 0.000001));
+        vec2 outdoor = drtFogOutdoorInterval(start, end);
+        float deltaTau = drtWeatherSegmentOpticalDepth(
+            mix(start, end, outdoor.x), mix(start, end, outdoor.y), false);
         float segmentWeight = exp(-opticalDepth) * (1.0 - exp(-deltaTau));
         opticalDepth += deltaTau;
-        vec3 mid = direction * (0.5 * (distance + previousDistance));
+        vec3 mid = mix(start, end, 0.5 * (outdoor.x + outdoor.y));
         vec3 coords = (toShadow * vec4(mid, 0.0)).xyz + cameraInShadow;
         float visibility = 1.0;
         if (all(greaterThanEqual(coords, vec3(0.0))) && all(lessThanEqual(coords, vec3(1.0))))

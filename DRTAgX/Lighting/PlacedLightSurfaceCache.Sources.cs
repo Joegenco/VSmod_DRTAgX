@@ -18,6 +18,8 @@ internal sealed partial class PlacedLightSurfaceCache
     private int _residentSourceCount;
     private int _knownSourceRevision = -1;
     private int _demandSourceRevision = -1;
+    private StaticLightSources? _retentionIndex;
+    private int _retentionKnown = -1, _retentionDemand = -1, _retainedAllowance;
 
     private readonly StaticLightSources.Source[] _previousDemandSources =
         new StaticLightSources.Source[StaticTerrainShadowMaps.MaxDepthSources];
@@ -35,9 +37,29 @@ internal sealed partial class PlacedLightSurfaceCache
     private readonly float[] _records =
         new float[StaticTerrainShadowMaps.MaxDepthSources * StaticLightGpuRecord.FloatCount];
 
+    private int RetainedCompletedAllowance()
+    {
+        if (_sourceIndex == null) return StaticTerrainShadowMaps.MaxDepthSources;
+        if (ReferenceEquals(_retentionIndex, _sourceIndex) && _retentionKnown == _sourceIndex.KnownRevision &&
+            _retentionDemand == _sourceIndex.DemandRevision) return _retainedAllowance;
+        int demanded = 0;
+        var known = _sourceIndex.KnownSources;
+        for (int i = 0; i < known.Count && demanded < StaticTerrainShadowMaps.MaxDepthSources; ++i)
+            if (_sourceIndex.IsDemanded(known[i]))
+                demanded++;
+        // Warm offscreen history yields first when source7 is full. Reserve
+        // every demanded source, including missing depth; cold retained maps
+        // must never force the whole visible scene into capacity fallback.
+        _retainedAllowance = StaticTerrainShadowMaps.MaxDepthSources - demanded;
+        _retentionIndex = _sourceIndex;
+        _retentionKnown = _sourceIndex.KnownRevision;
+        _retentionDemand = _sourceIndex.DemandRevision;
+        return _retainedAllowance;
+    }
+
     private bool SourcesChanged(StaticTerrainShadowMaps maps)
     {
-        int count = 0;
+        int count = 0, retained = RetainedCompletedAllowance();
         var lights = maps.CompletedLights;
         for (int i = 0; i < lights.Count; ++i)
         {
@@ -45,7 +67,10 @@ internal sealed partial class PlacedLightSurfaceCache
             // Staging may be complete but still crossfading a replacement.
             // Keep the promoted resident's field until its atomic depth copy.
             if (light.Slot < 0 || light.Slot >= maps.Capacity) continue;
-            if (_sourceIndex != null && !_sourceIndex.IsDemanded(light.Source)) continue;
+            // Completed loaded maps are world lighting, not camera demand.
+            // Keep their fields warm across turns/doorways; only discovery and
+            // missing-depth admission remain gated by real visible receivers.
+            if (_sourceIndex != null && !_sourceIndex.IsDemanded(light.Source) && retained-- <= 0) continue;
             if (count >= SourceCount || _sources[count] != light.Source || _slots[count] != light.Slot ||
                 _depthReady[count] != maps.IsDepthCurrent(light.Source)) return true;
             count++;
@@ -113,7 +138,7 @@ internal sealed partial class PlacedLightSurfaceCache
                 _previousDemandPositions.Add(StaticLightSources.Identity(_previousDemandSources[i]));
         }
 
-        int count = 0;
+        int count = 0, retained = RetainedCompletedAllowance();
         Array.Clear(_records);
         Array.Clear(_eligible);
         BoundsReady = false;
@@ -124,7 +149,10 @@ internal sealed partial class PlacedLightSurfaceCache
         {
             var light = lights[i];
             if (light.Slot < 0 || light.Slot >= maps.Capacity) continue;
-            if (_sourceIndex != null && !_sourceIndex.IsDemanded(light.Source)) continue;
+            // Completed loaded maps are world lighting, not camera demand.
+            // Keep their fields warm across turns/doorways; only discovery and
+            // missing-depth admission remain gated by real visible receivers.
+            if (_sourceIndex != null && !_sourceIndex.IsDemanded(light.Source) && retained-- <= 0) continue;
             if (count >= StaticTerrainShadowMaps.MaxDepthSources) break;
             var source = light.Source;
             int at = count * StaticLightGpuRecord.FloatCount;
@@ -223,7 +251,13 @@ internal sealed partial class PlacedLightSurfaceCache
             {
                 var identity = StaticLightSources.Identity(_sources[i]);
                 _currentDemandPositions.Add(identity);
-                if (!_previousDemandPositions.Contains(identity)) MarkInfluence(_sources[i]);
+                if (!_previousDemandPositions.Contains(identity))
+                {
+                    MarkInfluence(_sources[i]);
+                    // A newly admitted visible lamp needs the same immediate
+                    // receiver coverage as an edit, even if its depth was cold.
+                    _visibleRefreshPending |= _sourceIndex!.IsDemanded(_sources[i]);
+                }
             }
 
             for (int i = 0; i < previousDemandCount; ++i)

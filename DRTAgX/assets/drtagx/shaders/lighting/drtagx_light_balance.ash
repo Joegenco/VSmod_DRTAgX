@@ -234,7 +234,9 @@ vec3 drtDynamicContribution(vec3 delta, vec3 authored, vec3 normal, float visibi
     // hidden contributions stay zero. Only entityanimated defines this gain.
     surfaceVisibility *= 1.0 + (DRT_ANIMATED_POINT_FACING_GAIN - 1.0) * clamp(towardsLight, 0.0, 1.0);
 #endif
-    return DRT_DYNAMIC_GAIN * max(authored / peak, vec3(0.0)) *
+    // Match deferred publication: normalization may reduce strong lamps, never
+    // amplify subunit wearable/modded emission into a full-strength lamp.
+    return DRT_DYNAMIC_GAIN * max(authored / max(peak, 1.0), vec3(0.0)) *
         (w * sqrt(w) / (1.0 + 0.25 * d)) * surfaceVisibility;
 }
 

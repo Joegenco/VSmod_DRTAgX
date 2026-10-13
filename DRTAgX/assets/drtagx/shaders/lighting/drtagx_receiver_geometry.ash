@@ -1,5 +1,6 @@
 #ifndef DRT_RECEIVER_GEOMETRY
 #define DRT_RECEIVER_GEOMETRY
+#include drtagx_foliage_receiver.ash
 #ifndef DRT_RECEIVER_VERTEX
 #include drtagx_placed_surface_normal.ash
 #endif
@@ -64,6 +65,28 @@ void drtAuthorReceiverBounds(vec3 reference,vec3 edgeA,vec3 edgeB,uint token) {
     drtReceiverBoundsUnits=ivec4(rounded)+ivec4(origin,origin);
     drtReceiverBoundsValid=1;
 }
+void drtAuthorFoliageReceiver(vec3 local,vec3 reference,vec3 edgeA,vec3 edgeB) {
+#ifdef DRT_PERFORMANCE_NO_PLS
+    return;
+#endif
+    if(drtFoliageReceiverEnabled==0 || drtReceiverGeometryEnabled==0)return;
+    // Derive an immutable card plane, not a wind-bent derivative or a grass
+    // vertex's synthetic lighting normal. Native grass randomizes its rotation;
+    // quantize the plane slope to signed-magnitude seven at its fixed center.
+    // This bounded rest-pose approximation is safe for a receiver-only card:
+    // its own geometry never enters the shadow atlas and cannot cause acne.
+    vec3 plane=cross(edgeA,edgeB);float peak=max(abs(plane.x),max(abs(plane.y),abs(plane.z)));
+    if(peak<=1e-10)return;
+    ivec3 q=ivec3(round(plane*(7.0/peak)));
+    uint token=uint(abs(q.x)*2+(q.x<0?1:0))|
+        (uint(abs(q.y)*2+(q.y<0?1:0))<<4u)|(uint(abs(q.z)*2+(q.z<0?1:0))<<8u);
+    // Centering halves the worst projection error of a randomly rotated card;
+    // the same rest reference is used for every vertex and both triangles.
+    drtAuthorReceiverPlane(local,reference+0.5*(edgeA+edgeB),token,true);
+    if(drtReceiverPlaneValue<=-DRT_FOLIAGE_PLANE_BIAS || drtReceiverPlaneValue>=DRT_FOLIAGE_PLANE_BIAS)return;
+    // 2 denotes a rest-pose card; it uses complete one-block field support.
+    drtReceiverBoundsValid=2;
+}
 #else
 flat in ivec4 drtReceiverPlaneMetadata;
 flat in ivec4 drtReceiverBoundsUnits;
@@ -76,10 +99,10 @@ in vec4 drtReceiverUnbiasedClip;
 #define drtReceiverPlaneResidual drtReceiverPlaneVariation.x
 #define drtReceiverWarp drtReceiverPlaneVariation.y
 int drtValidatedReceiverPlane(out uint token) {
-    // BoundsValid is a primitive-wide certificate: packed owners checked all
-    // four normal/wind flags, and the vertex helper proved both actual edges
-    // coplanar with this native normal and finite tangent rectangle. VBO input
-    // has no such certificate and remains native fallback.
+    // BoundsValid is a primitive-wide certificate: ordinary packed owners
+    // proved a static finite rectangle; wind owners proved an immutable card
+    // plane and transport its rest coordinates separately. VBO input has no
+    // such certificate and remains native fallback.
     // Do not re-derive that proof from smooth fragment interpolation. Near 4K
     // pixels have legitimately tiny derivative cross-products, while pool-local
     // ULPs and large plane-unit residuals can randomly reject a valid flat face.

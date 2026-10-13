@@ -3,6 +3,8 @@ using HarmonyLib;
 using OpenTK.Graphics.OpenGL4;
 using Vintagestory.API.Client;
 
+// Domain folders share the root namespace; Harmony requires the __state name.
+// ReSharper disable CheckNamespace, InconsistentNaming
 namespace DRTAgX;
 
 /// <summary>
@@ -15,10 +17,11 @@ internal sealed class CelestialSunBindings : IDisposable
     private static CelestialSunBindings? _current;
     private readonly ICoreClientAPI _api;
     private readonly Harmony _harmony = new(PatchId);
+    private AstraCelestialCompatibility? _astra;
     private IShaderProgram? _shader;
     private int _program, _location = -1;
 
-    private readonly record struct DrawScope(int Program, int Location, int Previous);
+    internal readonly record struct DrawScope(int Program, int Location, int Previous);
 
     internal CelestialSunBindings(ICoreClientAPI api)
     {
@@ -32,6 +35,7 @@ internal sealed class CelestialSunBindings : IDisposable
                 finalizer: new HarmonyMethod(typeof(CelestialSunBindings), nameof(AfterDraw)));
             _current = this;
             api.Event.ReloadShader += Reload;
+            _astra = new AstraCelestialCompatibility(api);
             api.Logger.Notification("[DRT AgX] Native standard sun draw uses celestial HDR composition.");
         }
         catch (Exception ex)
@@ -44,26 +48,34 @@ internal sealed class CelestialSunBindings : IDisposable
 
     private static void BeforeDraw(out DrawScope __state)
     {
-        __state = default;
+        __state = BeginDraw(1);
+    }
+
+    // Mode 1 is the native sun; mode 2 is provider-authored celestial radiance.
+    // AstraTerra draws from a sun/moon postfix, so these scopes can nest.
+    internal static DrawScope BeginDraw(int mode)
+    {
         var owner = _current;
-        if (owner == null) return;
+        if (owner == null) return default;
         IShaderProgram? shader = owner._api.Render.GetEngineShader(EnumShaderProgram.Standard);
-        if (shader == null || shader.Disposed || shader.LoadError) return;
+        if (shader == null || shader.Disposed || shader.LoadError) return default;
         if (!ReferenceEquals(shader, owner._shader) || shader.ProgramId != owner._program)
         {
             owner._shader = shader;
             owner._program = shader.ProgramId;
             owner._location = GL.GetUniformLocation(shader.ProgramId, "drtSunSprite");
         }
-        if (owner._location < 0) return;
+
+        if (owner._location < 0) return default;
         // Render thread only. Direct program uniforms change no shader, texture,
         // or framebuffer binding; preserve prior state even for nested callbacks.
         GL.GetUniform(owner._program, owner._location, out int previous);
-        __state = new DrawScope(owner._program, owner._location, previous);
-        GL.ProgramUniform1(__state.Program, __state.Location, 1);
+        var scope = new DrawScope(owner._program, owner._location, previous);
+        GL.ProgramUniform1(scope.Program, scope.Location, mode);
+        return scope;
     }
 
-    private static void AfterDraw(DrawScope __state)
+    internal static void AfterDraw(DrawScope __state)
     {
         // Harmony finalizers run on normal return and exceptions. The flag must
         // never escape into terrain, entities, first-person items or GUI draws.
@@ -83,6 +95,8 @@ internal sealed class CelestialSunBindings : IDisposable
 
     public void Dispose()
     {
+        _astra?.Dispose();
+        _astra = null;
         _api.Event.ReloadShader -= Reload;
         _harmony.UnpatchAll(PatchId);
         if (_current == this) _current = null;

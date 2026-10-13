@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.1.1
+
+- Reworked dense weather fog. The heaviest mist now leaves roughly 10 blocks of useful visibility and no longer gets the sky's full brightness boost.
+- Indoor fog now uses room enclosure, with a fallback for larger halls. Rooms stay clear while fog outside remains visible through doors and windows. Cave protection remains.
+- Volumetric fog now respects indoor shelter and fades with dense weather instead of adding another bright layer over it.
+- Covered VS Roofing tiles now block Sheyder's blocklight and Directional Sun as full blocks. Bare roof frames stay open.
+- Improved PLS updates when turning around, entering rooms and returning to previously lit areas. Reduced the visible lighting fill-in effect.
+- Grass and wind-affected foliage now receive cached PLS. Lighting follows the vegetation without being recalculated for every wind movement. Foliage still does not cast PLS shadows.
+- Rebalanced animated entities, open doors and chests. Animated entities retain their blocklight brightness, with PLS providing the direction of the light.
+- Fixed moving light leaking through the back side of walls.
+- VS Roofing tiles and other solid two-sided terrain now cast moving-light shadows.
+- Improved Directional Sun lighting around chiseled roofs.
+- Reduced moving-light shadow artefacts when a light is close to, or clips into, a surface.
+- Improved held-light positioning for other players, using their animated hand positions where available.
+- Fixed weak moving light sources, including the temporal gear amulet, being made too bright.
+- Particles, including rain and splashes, now follow Sheyder's baked blocklight. Removed extra unshadowed PLS lighting on particles, while keeping their intended glow.
+- Fixed the transparency compositor leaving terrain normal and position data undefined behind glass and other transparent effects. Normal glass tint and transparency are preserved.
+- Added AstraTerra and AstraExtera compatibility for stars, moons and other celestial objects.
+
 ## 2.1.0
 
 - Placed light shadows (PLS) completely overhauled, with cached surface lighting and much less repeated work.

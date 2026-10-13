@@ -16,21 +16,31 @@ float drtMovingPcf(vec3 shadow,vec2 gradient,int slot,int face,bool held) {
     // stride follows map height; PCF offsets use separate X/Y texel spacing.
     if(held)origin=vec2(float(drtMovingAtlasColumns)*2.0*stride+4.0,float(slot)*(size.y+8.0)+4.0);
     else origin+=vec2(face%2,face/2)*stride;
-    vec2 texel=1.0/size,atlasSize=drtMovingAtlasInfo.xy;
-    // Follow the receiving plane per tap, including the hardware bilinear footprint.
-    // D24 precision margin is four depth-code steps. A large projected bias
-    // would erase close blockers with the held projector's 5 mm near plane.
-    float reference=shadow.z-dot(abs(gradient),texel)-0.00000024,visibility=0.0;
-    // Each hardware-linear comparison filters four adjacent depth texels. Four
-    // symmetric footprints give moving shadows a stable soft edge without the
-    // nine fetches formerly used outside performance mode. Keep the per-tap
-    // receiving-plane depth correction and the same four-code D24 margin.
-    for(int y=-1;y<=1;y+=2)for(int x=-1;x<=1;x+=2) {
-        vec2 uv=clamp(shadow.xy+vec2(x,y)*texel*0.8,texel,1.0-texel);
-        float depth=reference+dot(gradient,uv-shadow.xy);
-        visibility+=texture(drtShadowMaps,vec3((origin+uv*size)/atlasSize,depth));
+    vec2 atlasSize=drtMovingAtlasInfo.xy;
+    vec2 receiverPixel=shadow.xy*size-0.5;
+    vec2 pixel=clamp(receiverPixel,vec2(0),size-1.0);
+    vec2 base=floor(pixel),fraction=fract(pixel);
+    float visibility=0.0,weightSum=0.0;
+    // Each comparison samples an exact texel center and follows the receiver
+    // plane to that center. Reconstruct bilinear filtering with four fetches:
+    // sharing one reference across hardware-linear footprints required a bias
+    // proportional to 1/light-plane-distance and erased close occluders.
+    for(int y=0;y<=1;++y)for(int x=0;x<=1;++x) {
+        vec2 cell=min(base+vec2(x,y),size-1.0);
+        vec2 w=mix(1.0-fraction,fraction,vec2(x,y));
+        float weight=w.x*w.y;
+        // Fused subtraction keeps fractional receiver positions accurate too:
+        // rounding UV*size before cancellation creates acne on steep planes.
+        vec2 delta=fma(-shadow.xy,size,cell+0.5)/size;
+        float depth=fma(gradient.x,delta.x,fma(gradient.y,delta.y,shadow.z));
+        // A grazing plane can leave the projection's depth domain within one
+        // texel. Such rays have no represented receiver, so omit their weight
+        // instead of turning them into opaque wedges or diluting valid taps.
+        if(depth<0.0||depth>1.0)continue;
+        visibility+=weight*texture(drtShadowMaps,vec3((origin+cell+0.5)/atlasSize,depth-0.00000024));
+        weightSum+=weight;
     }
-    return visibility*0.25;
+    return weightSum>1e-6?visibility/weightSum:1.0;
 }
 float drtMovingCubeFace(vec3 q,vec3 normal,float planeDistance,int slot,int face) {
     vec2 side,nside;float forward,nforward;
@@ -40,16 +50,27 @@ float drtMovingCubeFace(vec3 q,vec3 normal,float planeDistance,int slot,int face
     float a=(farPlane+0.1)/(0.1-farPlane),b=0.2*farPlane/(0.1-farPlane);
     vec3 shadow=vec3(0.5+0.47*side/forward,0.5*(1.0-a+b/forward));
     if(any(lessThan(shadow,vec3(0)))||any(greaterThan(shadow,vec3(1))))return 1.0;
-    return drtMovingPcf(shadow,b*nside/(0.94*planeDistance),slot,face,false);
+    float visibility=drtMovingPcf(shadow,b*nside/(0.94*planeDistance),slot,face,false);
+    // Receivers enter the cube's near clip domain continuously. Nearby casters
+    // can still occlude distant receivers through the depth-clamped map.
+    return mix(1.0,visibility,smoothstep(0.1,0.12,forward));
 }
 float drtMovingVisibility(vec3 receiver,vec3 emitter,int lightIndex,vec3 unitNormal) {
     int slot=drtShadowSlot[lightIndex];
     if(drtShadowCount<=0||slot<0)return 1.0;
     vec3 q=receiver-emitter;float distance=length(q);
-    if(distance<0.12||distance>=drtShadowRange[slot])return 1.0;
+    if(distance<0.00001||distance>=drtShadowRange[slot])return 1.0;
     float planeDistance=dot(unitNormal,q);
-    // Preserve back-facing radiance's established normal-facing floor.
-    if(planeDistance>=-0.00001)return 1.0;
+    // Diffuse lighting retains its stylized back-facing floor, but that floor
+    // must still be occluded by walls. Orient only the shadow receiver plane
+    // toward the source: N/dot(N,q) is unchanged, while the normal bias keeps
+    // pointing toward the emitter on either side of a surface. The caller's
+    // diffuse normal is unchanged because GLSL arguments are copied by value.
+    if(planeDistance>0.0){unitNormal=-unitNormal;planeDistance=-planeDistance;}
+    // Within one texture cell of the emitter plane, retain the contact fade
+    // that prevents unstable grazing comparisons near a moving source.
+    float contactWeight=smoothstep(0.0,1.0/32.0,-planeDistance);
+    if(contactWeight<=1e-6)return 1.0;
     if(drtShadowGridEnabled!=0) {
         // Anchor to the world, never to the moving emitter. Work relative to
         // the exact double-camera phase to avoid large-world float rounding.
@@ -58,10 +79,21 @@ float drtMovingVisibility(vec3 receiver,vec3 emitter,int lightIndex,vec3 unitNor
         vec3 position=mat3(invModelViewMatrix)*receiver+drtSunGridCameraPhase;
         vec3 offset=(floor(position*32.0)+0.5)/32.0-position;
         offset-=normalWorld*dot(normalWorld,offset)/max(dot(normalWorld,normalWorld),1e-6);
-        q+=transpose(mat3(invModelViewMatrix))*offset;
+        // Inside two cells a half-cell shift can move an on-axis receiver
+        // outside a close projector. Retain the exact styled grid farther away.
+        float gridWeight=smoothstep(1.0/32.0,2.0/32.0,distance);
+        q+=transpose(mat3(invModelViewMatrix))*offset*gridWeight;
     }
-    // Bias from the snapped comparison point; continuous lighting/range above stays unchanged.
-    vec3 biased=q*(1.0-0.01/max(length(q),0.00001))+unitNormal*0.003;
+    // A fixed normal offset can cross the light's tangent plane at grazing
+    // incidence. Scale it by incidence, then use the *biased* plane for PCF:
+    // the old unshifted denominator diverged on steep edges and made bands.
+    float comparisonDistance=max(length(q),0.00001);
+    float incidence=clamp(-dot(unitNormal,q)/comparisonDistance,0.0,1.0);
+    // At contact, the usual 10 mm radial + 3 mm normal bias must not cross
+    // the light origin. Cap their combined displacement at 10% of distance.
+    float biasScale=min(1.0,comparisonDistance/0.13);
+    vec3 biased=q*(1.0-0.01*biasScale/comparisonDistance)+unitNormal*(0.003*incidence*biasScale);
+    planeDistance=dot(unitNormal,biased);
     int kind=drtShadowKind[slot];
     if(kind>0) {
         int hand=kind-1;if(drtHeldStatus[hand].x<=0.0)return 1.0;
@@ -71,17 +103,26 @@ float drtMovingVisibility(vec3 receiver,vec3 emitter,int lightIndex,vec3 unitNor
         if(any(lessThan(shadow,vec3(0)))||any(greaterThan(shadow,vec3(1))))return 1.0;
         float farPlane=drtShadowRange[slot]+0.5,b=2.0*farPlane*0.005/(0.005-farPlane);
         vec2 gradient=b*unitNormal.xy/(vec2(matrix[0][0],matrix[1][1])*planeDistance);
-        return drtMovingPcf(shadow,gradient,slot,0,true);
+        float visibility=drtMovingPcf(shadow,gradient,slot,0,true);
+        // The single held projector intentionally has finite angular coverage.
+        // Fade inside its padding: 5% of UV (at least three texels) leaves
+        // normally padded receivers untouched, avoiding a hard coverage edge.
+        vec2 edge=min(shadow.xy,1.0-shadow.xy)*drtMovingHeldSize;
+        vec2 fadeWidth=max(vec2(3.0),drtMovingHeldSize*0.05);
+        float edgeWeight=smoothstep(0.0,1.0,min(edge.x/fadeWidth.x,edge.y/fadeWidth.y));
+        float nearWeight=smoothstep(0.005,0.012,clip.w);
+        return mix(1.0,visibility,contactWeight*edgeWeight*nearWeight);
     }
     int face=drtCubeFace(biased);
     float primary=drtMovingCubeFace(biased,unitNormal,planeDistance,slot,face);
     vec3 axes=abs(biased);float major=max(axes.x,max(axes.y,axes.z));
     float runnerUp=max(min(axes.x,axes.y),max(min(axes.y,axes.z),min(axes.x,axes.z)));
-    if(major-runnerUp>=major*0.03)return primary;
+    if(major-runnerUp>=major*0.03)return mix(1.0,primary,contactWeight);
     vec3 secondaryDirection=biased;
     if(face<2)secondaryDirection.x=0.0;else if(face<4)secondaryDirection.y=0.0;else secondaryDirection.z=0.0;
     float secondary=drtMovingCubeFace(biased,unitNormal,planeDistance,slot,drtCubeFace(secondaryDirection));
-    return mix(secondary,primary,0.5+0.5*smoothstep(0.0,major*0.03,major-runnerUp));
+    float visibility=mix(secondary,primary,0.5+0.5*smoothstep(0.0,major*0.03,major-runnerUp));
+    return mix(1.0,visibility,contactWeight);
 }
 #ifdef DRT_DEFERRED_DEBUG
 // Debug interface; the lighting hot path below normalizes its normal once.

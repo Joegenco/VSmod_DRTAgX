@@ -51,7 +51,7 @@ DrtFogTransport drtSkyMediumTransport(vec3 direction) {
     float distance = clamp(length(view.xyz / max(abs(view.w), 0.00001)), 0.0, 8000.0);
     vec3 p = normalize(direction) * distance;
     vec3 start = submerged ? p : vec3(0.0), finish = submerged ? end : p;
-    float t = drtAirTransmittance(start, finish, !submerged) * drtWorldFogSegmentTransmittance(start, finish);
+    float t = drtWeatherTransmittance(start, finish, !submerged);
     // Expose only the air segment; water absorption/murk keeps its native energy.
     DrtFogTransport air = DrtFogTransport(vec3(t), drtWeatherRadiance(direction) * (1.0 - t));
     DrtFogTransport water = drtWaterTransport(submerged ? distance : 8000.0 - distance, murk, submerged);
@@ -83,7 +83,7 @@ DrtFogTransport drtSurfaceMediumTransport(vec3 worldPos, float receiverDepth, bo
             fog = drtComposeTransport(drtAirTransport(vec3(0.0), interfacePos, true, exposure),
                 drtWaterTransport(distance - interfaceDistance, murk, false));
         }
-        if (boundary && exposure > 0.0 && distance > 0.0001) {
+        if (boundary && exposure > 0.0 && distance > 0.0001 && drtFogOutdoorInterval(vec3(0.0), p).x < 1.0) {
             // Shelter masks atmospheric concealment, never water absorption.
             float t = mix(1.0, drtBoundaryTransmittance(length(p.xz)), exposure);
             vec3 background = submerged ? murk : drtSkyBackground(normalize(p));

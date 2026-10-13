@@ -18,7 +18,7 @@ uniform vec4 rgbaLightIn;
 uniform vec4 rgbaGlowIn;
 uniform vec4 rgbaFogIn;
 uniform int extraGlow;
-// Scoped by the native sun/moon callback; ordinary standard draws keep zero.
+// Scoped celestial kind: 0 = world/UI, 1 = native sun, 2 = Astra sky/body.
 uniform int drtSunSprite = 0;
 uniform float fogMinIn;
 uniform float fogDensityIn;
@@ -143,8 +143,8 @@ void main(void)
 	gl_Position.w += extraZOffset;
 
     if (drtSunSprite != 0) {
-        // The sun is a distant emitter, not a lit world item. Preserve native
-        // tint/coverage without surface light or view-distance fading.
+        // Celestial meshes already carry their authored radiance/phase. Preserve
+        // their tint and coverage without local light or view-distance fading.
         color = rgbaTint * colorIn;
         color.a *= clamp(1.0 - getSpheresFogAmount(worldPos.xyz * 10.0), 0.0, 1.0);
     }

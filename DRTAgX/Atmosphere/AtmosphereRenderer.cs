@@ -12,13 +12,14 @@ namespace DRTAgX;
 internal sealed class AtmosphereRenderer : IRenderer
 {
     private readonly ICoreClientAPI _api;
-    internal const int FrameFloatCount = 120; // Existing ABI plus an aligned fog/shelter/LOD vec4.
+    internal const int FrameFloatCount = AtmosphereRoomShelter.FrameFloatCount; // Shared std140 header plus cached room occupancy.
 
     private readonly float[] _frame = new float[FrameFloatCount],
         _inverseView = new float[16],
         _inverseProjection = new float[16];
 
     private readonly double[] _sunGridInverseView = new double[16];
+    private readonly Vec3d _fogCamera = new();
     private readonly AtmosphereComputeState _state = new();
     private readonly AtmosphereSkyResources _sky;
     private readonly AtmosphereFogVolume _volume = new();
@@ -26,7 +27,7 @@ internal sealed class AtmosphereRenderer : IRenderer
     private readonly AtmosphereSkyProfile _profile = new();
     private readonly AtmosphereSheyderBridge _sheyder;
     private readonly AtmosphereProgramBindings _bindings;
-    private readonly AtmosphereFogEnvironment _fogEnvironment = new();
+    private readonly AtmosphereFogEnvironment _fogEnvironment;
     private readonly LodFogRange _lodFogRange;
     private readonly int _buffer;
     private int _worldFogProgram, _wfDensity = -1, _wfIntensity = -1, _wfStart = -1, _wfFalloff = -1;
@@ -40,6 +41,7 @@ internal sealed class AtmosphereRenderer : IRenderer
     internal AtmosphereRenderer(ICoreClientAPI api)
     {
         _api = api;
+        _fogEnvironment = new AtmosphereFogEnvironment(api);
         _lodFogRange = new LodFogRange(api);
         _sky = new AtmosphereSkyResources(api);
         _sheyder = new AtmosphereSheyderBridge(api);
@@ -99,7 +101,17 @@ internal sealed class AtmosphereRenderer : IRenderer
         var data = _api.World.Player.WorldData;
         int approved = data.LastApprovedViewDistance;
         _frame[8] = desired > 0 && approved > 0 ? Math.Min(desired, approved) : Math.Max(desired, approved);
-        _fogEnvironment.Capture(_api, _frame, _lodFogRange.Endpoint);
+        // Room bounds and shader rays must share the rendered eye, not the
+        // entity/render-origin position. The full double view includes eye height
+        // and third-person orbit; reuse its inverse for the sun-grid phase below.
+        bool worldCameraValid = _api.World is ClientMain;
+        if (_api.World is ClientMain cameraWorld)
+        {
+            Mat4d.Invert(_sunGridInverseView, cameraWorld.CurrentModelViewMatrixd);
+            _fogCamera.Set(_sunGridInverseView[12], _sunGridInverseView[13], _sunGridInverseView[14]);
+        }
+        else _fogCamera.Set(_api.World.Player.Entity.CameraPos);
+        _fogEnvironment.Capture(_api, _frame, _lodFogRange.Endpoint, _fogCamera);
         _frame[9] = 200f;
         _frame[10] = _api.World is ClientMain client && client.playerProperties != null &&
                      client.playerProperties.EyesInWaterDepth >= 0.1f
@@ -126,11 +138,10 @@ internal sealed class AtmosphereRenderer : IRenderer
         _frame[23] = (float)(_api.World.Player.Entity.CameraPos.Y - _api.World.SeaLevel);
         // Reuse the existing frame flag; disabling the look also skips camera-phase work.
         _frame[115] = 0f;
-        if (SunShadowGridEnabled && _api.World is ClientMain gridWorld)
+        if (SunShadowGridEnabled && worldCameraValid)
         {
             // Native Opaque camera is ready at this snapshot boundary. Forward
             // receivers share the existing UBO; no per-draw camera/grid uploads.
-            Mat4d.Invert(_sunGridInverseView, gridWorld.CurrentModelViewMatrixd);
             for (int i = 0; i < 3; ++i)
                 _frame[112 + i] = (float)(_sunGridInverseView[12 + i] - Math.Floor(_sunGridInverseView[12 + i]));
             _frame[115] = 1f;

@@ -177,7 +177,7 @@ internal sealed partial class PlacedLightSurfaceCache : IDisposable
                 UploadRegions();
                 // View-driven membership stamps preserve truthful footprints,
                 // but only semantic source/depth edits need a full-screen burst.
-                if (visibleRefresh && ++VisibleRefreshRevision == 0) VisibleRefreshRevision = 1;
+                if ((visibleRefresh || _visibleRefreshPending) && ++VisibleRefreshRevision == 0) VisibleRefreshRevision = 1;
                 _visibleRefreshPending = false;
                 _maps = maps;
                 _depthGeneration = maps.DepthGeneration;

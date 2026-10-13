@@ -148,12 +148,13 @@ void sm_deferredFill(vec4 texColor, vec3 rawAlbedo)
     // No-cull is a raster pass, not a foliage material: stationary doors and
     // paintings need solid placed-light receiving/compositing. Interpolated wind
     // presence includes fixed roots in a triangle with moving grass tips.
-    bool drtStaticNoCull = haxyFade > 0 && drtWindPresence <= 0.0;
+    bool drtStaticNoCull = haxyFade > 0 && drtWindPresence <= 0.0 && drtReceiverBoundsValid!=2;
     int windMode = renderFlags & WindModeBitMask;
+    bool drtWindReceiver = drtWindPresence > 0.0 || drtReceiverBoundsValid==2;
     bool drtGrassReceiver = haxyFade > 0 && windMode != 0 && windMode != WindModeLeavesMask;
     // -8..-9 identifies non-leaf wind foliage for receiver-only shadow bias.
     // It remains a foliage contact caster and keeps its normal shading.
-    float contactClass = drtStaticNoCull ? 8.0 : drtGrassReceiver ? 6.0 : haxyFade > 0 ? 4.0 :
+    float contactClass = drtStaticNoCull ? 8.0 : drtGrassReceiver ? 6.0 : drtWindReceiver ? 4.0 :
         (alphaTest < 0.01 ? 2.0 : 0.0);
 
     // Opaque-pass pixels have already passed alpha testing and own their depth.
@@ -166,13 +167,17 @@ void sm_deferredFill(vec4 texColor, vec3 rawAlbedo)
     outColor = vec4(rawAlbedo * (drtVoxelLight * drtTerrainPlacedVisibility +
         drtTerrainPlacedRadiance + drtEmissionLight), drtSolidCaster ? 1.0 : texColor.a);
 #else
-    // Wind keeps native voxel lighting; solid placed lighting is filled by
-    // fullscreen relight, so G-buffer geometry needs no prepared PLS payload.
+    // Both solid and rest-pose wind lighting are read by fullscreen relight.
     outColor = vec4((drtDeferredIlluminationPayload != 0 ? vec3(1.0) : rawAlbedo) *
         (drtVoxelLight + drtEmissionLight), drtSolidCaster ? 1.0 : texColor.a);
-    if (haxyFade <= 0 && drtWindPresence <= 0.0 && windMode == 0) {
+    if (haxyFade <= 0 && drtWindPresence <= 0.0 && windMode == 0 && drtReceiverBoundsValid!=2) {
         outReceiverPlane = drtFragmentReceiverPlane;
         outReceiverBounds = drtPackedReceiverBounds(drtFragmentReceiverPlane);
+    } else if(drtReceiverBoundsValid==2 && drtFragmentReceiverPlane!=DRT_RECEIVER_INVALID_PLANE) {
+        // Position belongs to the undeformed mesh. Its cached lighting follows
+        // the interpolated card while its visible vertices continue to sway.
+        outReceiverPlane=drtPackFoliagePlane(drtFragmentReceiverPlane);
+        outReceiverBounds=drtPackFoliagePosition(vertexPosition+vec3(drtReceiverPoolOffset),drtFragmentReceiverToken);
     }
 #endif
 #if SSAOLEVEL > 0
@@ -189,10 +194,10 @@ void sm_deferredFill(vec4 texColor, vec3 rawAlbedo)
 #if defined(DRT_MEMO_ONLY) && !defined(DRT_PERFORMANCE_NO_PLS)
     // Carry the stable native world normal without a view-space half-float
     // round trip. Preserve every wind/no-cull W contract and AO foliage sign.
-    if (haxyFade <= 0 && drtWindPresence <= 0.0 && windMode == 0)
+    if (haxyFade <= 0 && drtWindPresence <= 0.0 && windMode == 0 && drtReceiverBoundsValid!=2)
         outGNormal.w = drtPackPlacedSurfaceNormal(drtMemoSurfaceNormal);
 #endif
-    if (haxyFade > 0) {
+    if (haxyFade > 0 || drtWindReceiver) {
         // The bent plane supplies sunlight receiving. Wind PLS uses its rest pose.
         // W preserves the authored vertex sunlight shade used in forward mode.
         outGNormal.xyz = mat3(modelViewMatrix) * drtTerrainSunPlaneNormal;

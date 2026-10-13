@@ -89,7 +89,14 @@ vec4 applyLightWithNormal(vec3 ambientColor, vec4 lightColor, int renderFlags, v
     drtVertexFogSunlight = sm_voxSunLight;
     drtSkyLight = drtAmbientSky(ambientColor);
     vec3 voxel = lightColor.rgb / max(1.0, glitchStrengthFL * 2.0);
-    applyLightWithoutPointLight(vec4(drtSunRadiance(sm_voxSunLight, drtSkyLight), 1.0),
+    vec3 sun = drtSunRadiance(sm_voxSunLight, drtSkyLight);
+#ifdef DRT_NATIVE_DIFFUSE_GAIN
+    // Only the native animated-block scope supplies a non-unit gain. Preserve
+    // sunlight access for fog/shadows and leave authored emission independent.
+    voxel *= DRT_NATIVE_DIFFUSE_GAIN;
+    sun *= DRT_NATIVE_DIFFUSE_GAIN;
+#endif
+    applyLightWithoutPointLight(vec4(sun, 1.0),
         vec4(voxel, 1.0), bGlow);
 #ifdef DRT_FORWARD_PLACED_LIGHTS
 #ifdef DRT_FORWARD_PLACED_GUARD
