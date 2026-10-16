@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.1.3
+
+- Improved lighting consistency between open and closed chests, doors and other animated blocks.
+- Supported containers no longer trigger PLS updates just from opening or closing. Closed containers keep casting shadows.
+- Improved PLS cache retention when turning around and returning to nearby areas.
+- Moving light shadows are softer, with reduced CPU overhead when several lights are active.
+- Moving light shadows stop rendering for sources over 42 blocks from the camera. Shadow depth is limited to 32 blocks from each light.
+- Reduced unnecessary PLS rendering work when no placed lights contribute to the scene.
+- Updated GhostChunks compatibility for its newer lighting and cloud shaders.
+- Weather fog now follows vanilla visibility more closely. Lighter haze reduced, and distant shaded terrain no longer cuts dark holes through the fog.
+- Improved fog protection for large enclosed halls.
+- Sheyder overexposure now also affects animated entities.
+- Leaves facing away from the sun are darker during the day, combined with existing sun shadows.
+- Disabled the moon's scattering halo during daytime.
+- Updated my default Sheyder settings.
+- Additional rendering fixes and performance optimisations.
+
 ## 2.1.1
 
 - Reworked dense weather fog. The heaviest mist now leaves roughly 10 blocks of useful visibility and no longer gets the sky's full brightness boost.

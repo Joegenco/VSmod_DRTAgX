@@ -5,6 +5,9 @@ uniform int isVertical;
 
 out vec2 vTexCoord;
 out vec2 vBlurStep;
+// Retain the native 21-element interface for shader consumers that still use
+// the old blur taps. The maintained fragment uses vTexCoord/vBlurStep instead.
+out vec2 texCoords[21];
 
 void main(void)
 {
@@ -21,4 +24,8 @@ void main(void)
     } else {
         vBlurStep = vec2(1.0 / frameSize.x, 0.0);
     }
+    // Native taps 0..15 are centered at index 8; initialize the complete array
+    // so consumers never receive undefined trailing coordinates.
+    for (int i = 0; i < 21; ++i)
+        texCoords[i] = vTexCoord + float(i - 8) * vBlurStep;
 }

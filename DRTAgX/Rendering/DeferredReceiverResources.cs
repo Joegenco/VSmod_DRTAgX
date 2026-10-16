@@ -26,6 +26,7 @@ internal sealed partial class DeferredReceiverResources : IDisposable
     private bool _geometryActive,
         _relightActive,
         _prepared,
+        _schedulingReady,
         _failed,
         _anchorReady,
         _irradianceAvailable,
@@ -39,7 +40,12 @@ internal sealed partial class DeferredReceiverResources : IDisposable
     internal int NormalTexture => _normal;
     internal int Width => _width;
     internal int Height => _height;
+
     internal bool Ready => _prepared;
+
+    // A validated deferred route can discover/bake its first light without
+    // writing auxiliary receiver targets while the published source set is empty.
+    internal bool SchedulingReady => _schedulingReady;
 
     internal DeferredReceiverResources(ICoreClientAPI api, object deferredOwner)
     {
@@ -56,6 +62,7 @@ internal sealed partial class DeferredReceiverResources : IDisposable
         EndRelight();
         EndGeometry();
         _prepared = false;
+        _schedulingReady = false;
         _irradianceAvailable = false;
         SetProducerPayload(false);
         var cache = PlacedLightSurfaceCache.Current;
@@ -63,8 +70,8 @@ internal sealed partial class DeferredReceiverResources : IDisposable
         // Active is the feature policy published before terrain, independent of
         // completed maps/pages. Inactive PLS has no auxiliary consumer: retain
         // the native payload and decal fallback without attaching/clearing MRTs.
-        // Do not gate Ready or CacheDisabled; bootstrap and legacy diagnostics
-        // still require prepared receiver ownership when the policy is active.
+        // A not-yet-ready cache still needs bootstrap ownership. Only a known
+        // ready empty snapshot skips the payload after route validation below.
         if (cache is { Active: false }) return;
         if (_anchorReady)
         {
@@ -97,6 +104,18 @@ internal sealed partial class DeferredReceiverResources : IDisposable
             if (_normal <= 0) throw new InvalidOperationException("native normal attachment missing");
             Attach(_geometryFbo, _plane, _geometrySaved, true);
             _geometryActive = true;
+            _schedulingReady = true;
+            if (cache is { Ready: true, SourceCount: 0 })
+            {
+                // Keep the exact native attachment/format validation above and
+                // retain storage, but do not clear or rasterize three unused
+                // full-resolution targets. Discovery uses ordinary scene depth.
+                // A first source published after this boundary receives native
+                // fallback until next frame's matching geometry is prepared.
+                EndGeometry();
+                return;
+            }
+
             ClearAuxiliary(true);
             _prepared = true;
             SetProducerPayload(true);
@@ -104,7 +123,7 @@ internal sealed partial class DeferredReceiverResources : IDisposable
         catch (Exception ex)
         {
             EndGeometry();
-            _prepared = false;
+            _prepared = _schedulingReady = false;
             _failed = true;
             _api.Logger.Warning("[DRTAgX] Authored receiver targets inactive; native lighting retained: " + ex.Message);
         }
@@ -305,7 +324,7 @@ internal sealed partial class DeferredReceiverResources : IDisposable
     {
         EndRelight();
         EndGeometry();
-        _failed = _prepared = false;
+        _failed = _prepared = _schedulingReady = false;
         _locations.Clear();
         SetProducerPayload(false);
     }

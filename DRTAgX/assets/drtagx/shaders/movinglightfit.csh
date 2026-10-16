@@ -75,7 +75,7 @@ void main() {
     vec2 slopeLimit=fitSlopeLimit();
     lo=max(lo,-slopeLimit);hi=min(hi,slopeLimit);
     const float nearPlane=0.005;
-    float farPlane=handLight[hand].w+0.5;
+    float farPlane=min(handLight[hand].w+0.5,32.0);
     mat4 p=mat4(0);
     p[0][0]=2.0/(hi.x-lo.x);p[1][1]=2.0/(hi.y-lo.y);
     p[2][0]=(hi.x+lo.x)/(hi.x-lo.x);p[2][1]=(hi.y+lo.y)/(hi.y-lo.y);
@@ -105,7 +105,7 @@ void main() {
             if(handLight[h].w<=0.0)continue;
             if(bad){infos[h].z+=1.0;continue;}
             vec3 q=receiver-handLight[h].xyz;
-            float reach=handLight[h].w+0.25;
+            float reach=min(handLight[h].w+0.25,32.0);
             if(dot(q,q)>reach*reach)continue;
             float forward=-q.z;
             // Receivers behind the forward projector intentionally use the

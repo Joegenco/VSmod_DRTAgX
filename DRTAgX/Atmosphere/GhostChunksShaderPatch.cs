@@ -5,7 +5,7 @@ using OpenTK.Graphics.OpenGL4;
 // ReSharper disable CheckNamespace
 namespace DRTAgX;
 
-/// <summary>Adapt the verified GhostChunks 1.6.9 fragment ABI without replacing its renderer.</summary>
+/// <summary>Adapt the verified GhostChunks 1.6.9/1.6.11 fragment ABI without replacing its renderer.</summary>
 internal static class GhostChunksShaderPatch
 {
     internal const string Marker = "// DRTAgX GhostChunks shared lighting v1";
@@ -18,7 +18,17 @@ internal static class GhostChunksShaderPatch
         const string version = "#version 330 core";
         const string lighting = "vec3 col = base * shade * ambientColor * noise;";
         const string sun = "if (sunShading > 0.0) {";
-        const string shadow = "col *= 1.0 - extShadowStrength * (1.0 - sunVis);";
+        const string terrainShadow = "1.0 - extShadowStrength * (1.0 - sunVis)";
+        const string cloudShadow = terrainShadow + " - extCloudStrength * (1.0 - cloudVis) * sunVis";
+        // 1.6.11 adds optional ReLight cloud shadows to this expression. Keep
+        // the provider's combined visibility intact, including its bootstrap
+        // fallback; accept only one of the two verified complete statements.
+        string shadowFactor = text.Contains("col *= " + cloudShadow + ";", StringComparison.Ordinal)
+            ? cloudShadow
+            : terrainShadow;
+        string shadow = "col *= " + shadowFactor + ";";
+        if (text.Contains("col *= " + terrainShadow + ";", StringComparison.Ordinal) &&
+            text.Contains("col *= " + cloudShadow + ";", StringComparison.Ordinal)) return false;
         const string fog = "float fog  = fogLevel(length(vRel), vRel.y);";
         const string edge = "fog = max(fog, (1.0 - edge) * edgeFog);";
         const string scattering = "if (atmosphere > 0.0 && beyond > 0.0)";
@@ -56,11 +66,11 @@ internal static class GhostChunksShaderPatch
                                vec3 col = drtShared ? drtLodMaterialAlbedo(base) * drtLodSkyLight() * noise
                                    : base * shade * ambientColor * noise;
                                """, StringComparison.Ordinal)
-            .Replace(shadow, """
-                             // Shared terrain combines face and cast darkness by maximum.
-                             col *= drtShared ? drtCombineSunDarkening(1.0 - extShadowStrength * (1.0 - sunVis), drtFace)
-                                 : 1.0 - extShadowStrength * (1.0 - sunVis);
-                             """, StringComparison.Ordinal)
+            .Replace(shadow, $$"""
+                               // Shared terrain combines face and cast darkness by maximum.
+                               col *= drtShared ? drtCombineSunDarkening({{shadowFactor}}, drtFace)
+                                   : {{shadowFactor}};
+                               """, StringComparison.Ordinal)
             .Replace(sun, "if (!drtShared && sunShading > 0.0) {", StringComparison.Ordinal)
             .Replace(water,
                 "vec3 drtWaterSky = drtShared ? drtSkyBackground(reflect(-V, wn)) : fogColor.rgb;\n        vec3 wcol = mix(col, drtWaterSky, fres * 0.3);",

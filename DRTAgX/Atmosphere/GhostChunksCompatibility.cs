@@ -131,8 +131,12 @@ internal sealed class GhostChunksCompatibility : IDisposable
         if (linked != 0 && GL.GetUniformBlockIndex(___glProgram, "DrtAtmosphere") >= 0)
         {
             // Ghost normally assigns these only while external shadows are on.
-            // Reserve its verified units before atmosphere sampler caching so a
-            // later ReLight toggle cannot collide with an already assigned LUT.
+            // Reserve both terrain (1.6.9+) and cloud (1.6.11+) sampler units
+            // before atmosphere caching, so a later ReLight toggle cannot
+            // overwrite our LUTs. Missing legacy cloud uniforms have location
+            // -1, which OpenGL deliberately treats as a no-op.
+            GL.ProgramUniform1(___glProgram, GL.GetUniformLocation(___glProgram, "extCloud0"), 11);
+            GL.ProgramUniform1(___glProgram, GL.GetUniformLocation(___glProgram, "extCloud1"), 12);
             GL.ProgramUniform1(___glProgram, GL.GetUniformLocation(___glProgram, "extShadow0"), 13);
             GL.ProgramUniform1(___glProgram, GL.GetUniformLocation(___glProgram, "extShadow1"), 14);
             hook._program = ___glProgram;

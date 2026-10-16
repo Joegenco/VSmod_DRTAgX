@@ -55,9 +55,9 @@ out float lod0Fade;
 out float nb;
 out float voxSunLight;
 
- #if SSAOLEVEL > 0
+// The fragment declares this normal for every SSAO setting. Keep both stages
+// compatible before dead-code elimination, including the SSAO-disabled path.
 out vec4 gnormal;
- #endif
 
 flat out int renderFlags;
 // WindMode occupies bits 25..28. Interpolate its presence so a grass triangle
@@ -186,10 +186,8 @@ void main(void)
 	
 	// SheyderMod: guarded unpack, never a NaN (see sm_unpackNormalOrZero)
 
-#if SSAOLEVEL > 0
 	gnormal = modelViewMatrix * vec4(normal.xyz, 0);
 	gnormal.w = isLeaves ? 1 : 0; // Cheap hax to make SSAO on leaves less bad looking;
-#endif
 
 
 	// To fix Z-Fighting on blocks over certain other blocks

@@ -79,12 +79,9 @@ internal sealed class MovingEntityShadowRenderer : IDisposable
     {
         if (_casters.Count == 0 || _program == null || !_borrowed) return 0;
         int draws = 0;
-        terrain.Stop();
+        var started = false;
         try
         {
-            _program.Use();
-            GL.Uniform1(_heldLocation, hand);
-            GL.ActiveTexture(TextureUnit.Texture0);
             // Share the current atlas sampler; changing it here would also
             // change filtering on the next terrain face in this same pass.
             for (int i = 0; i < _casters.Count; ++i)
@@ -98,6 +95,18 @@ internal sealed class MovingEntityShadowRenderer : IDisposable
                 if (x * x + y * y + z * z > reach * reach ||
                     (face >= 0 && !TerrainCasterBatch.IntersectsFace(x, y, z, caster.Radius, face))) continue;
 
+                // The frame-wide caster list may only overlap a different
+                // light/face. Do not run native shader hooks or change GL state
+                // until this projection has an actual animated draw.
+                if (!started)
+                {
+                    started = true;
+                    terrain.Stop();
+                    _program.Use();
+                    GL.Uniform1(_heldLocation, hand);
+                    GL.ActiveTexture(TextureUnit.Texture0);
+                }
+
                 Mat4f.Mul(_matrix, projectionCamera, caster.Model);
                 GL.UniformMatrix4(_matrixLocation, 1, false, _matrix);
                 GL.BindBufferRange(BufferRangeTarget.UniformBuffer, 0, _buffer,
@@ -108,8 +117,11 @@ internal sealed class MovingEntityShadowRenderer : IDisposable
         }
         finally
         {
-            _program.Stop();
-            terrain.Use();
+            if (started)
+            {
+                _program.Stop();
+                terrain.Use();
+            }
         }
 
         return draws;
@@ -134,6 +146,9 @@ internal sealed class MovingEntityShadowRenderer : IDisposable
             program.FragmentShader = api.Shader.NewShader(EnumShaderType.FragmentShader);
             program.FragmentShader.Code =
                 api.Assets.Get(new AssetLocation("drtagx", "shaders/moving_entity_shadow.fsh")).ToText();
+            // The shared fragment also serves static PLS container maps; only
+            // moving maps enforce the emitter-relative shadow-depth limit.
+            program.FragmentShader.PrefixCode = "\n#define DRT_MOVING_SHADOWS 1\n";
             api.Shader.RegisterMemoryShaderProgram("drtagx_moving_entity_shadow", program);
             if (!program.Compile())
                 throw new InvalidOperationException("Animated moving-shadow shader failed to compile");

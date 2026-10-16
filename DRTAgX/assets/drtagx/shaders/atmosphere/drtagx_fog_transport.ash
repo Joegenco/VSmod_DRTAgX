@@ -30,12 +30,11 @@ layout(std140) uniform DrtAtmosphere {
     vec4 drtScatteringFrame; // Native daily aerosol density/height, ozone and twilight spread.
     vec4 drtSunGridFrame;    // Fractional absolute camera xyz, w = grid enabled and phase valid.
     vec4 drtFogEnvironment;  // Live sunlight threshold, camera exposure, optional LOD endpoint, valid snapshot.
-    vec4 drtRoomMin;         // Camera-relative inclusive room corner; w = valid sheltered room.
+    vec4 drtRoomMin;         // Camera-relative inclusive room corner; w = eased shelter weight 0..1.
     vec4 drtRoomMax;         // Exclusive corner; w = rectangular (skip voxel traversal).
     uvec4 drtRoomVoxels[192]; // Native room bitset: X fastest, then Z, then Y. At most 29^3 cells.
 };
 
-const float DRT_AIR_FOG_STRENGTH = 1.0 / 2.0;
 // A 0.001% opacity floor keeps terrain fog metadata positive even at slider zero
 // or zero sunlight, including when exp(-opticalDepth) rounds to exactly one.
 const float DRT_MIN_FOG_OPACITY = 0.00001;
@@ -96,12 +95,21 @@ float drtRoomExitDistance(vec3 endpoint) {
 // sheltered room. A closed room is clear, while the view through its window
 // still has the correct exterior path length, independent of voxel sunlight.
 vec2 drtFogOutdoorInterval(vec3 start, vec3 end) {
-    if (drtRoomMin.w < 0.5) return vec2(0.0, 1.0);
+    if (drtRoomMin.w <= 0.0) return vec2(0.0, 1.0);
     float distance = length(end - start);
     if (distance < 0.0001) return vec2(1.0);
     float clearDistance = drtRoomExitDistance(end);
     float from = clamp((clearDistance - length(start)) / distance, 0.0, 1.0);
     return vec2(from, 1.0);
+}
+
+float drtRoomBoundaryExposure(vec3 endpoint, float exposure) {
+    float weight = clamp(drtRoomMin.w, 0.0, 1.0);
+    if (weight <= 0.0) return exposure;
+    // Keep distant concealment outside a window. Only a ray wholly inside the
+    // room loses its boundary contribution, over the same two-second fade.
+    float target = drtFogOutdoorInterval(vec3(0.0), endpoint).x < 1.0 ? 1.0 : 0.0;
+    return mix(exposure, target, weight);
 }
 
 // Near segment A followed by far segment B: camera receives A.S + A.T * B.S.
@@ -134,31 +142,21 @@ float drtFlatIntegral(float distance, float startY, float endY, float plane, flo
     return abs(density) * max(distance, 0.0) * average / 60.0;
 }
 
-float drtAirFogStrength(float density) {
-    // Double low-weather extinction and strengthen medium fog smoothly.
-    // The lift reaches zero at rho=.05, preserving the accepted heavy-fog curve.
-    return DRT_AIR_FOG_STRENGTH * mix(1.8, 0.4, smoothstep(0.01, 0.05, max(density, 0.0)));
-}
-
-float drtFlatFogStrength(float density) {
-    // Flat fog also grows with penetration below/above its signed plane.
-    // Give it its own response: a quarter of the previous flat extinction,
-    // without inheriting the increase to low ordinary weather fog.
-    return 0.25 * DRT_AIR_FOG_STRENGTH * mix(0.2, 1.0, smoothstep(0.01, 0.05, max(density, 0.0)));
-}
-
 float drtAirOpticalDepth(vec3 start, vec3 end) {
     float distance = length(end - start);
     vec4 density = drtAtmosphereView.z > 0.7 ? drtAirDensity : drtFogDensity;
-    // Remap density, not distance: weather still attenuates from the camera.
-    // Retain the authored linear/quadratic curve. drtAirFogStrength applies
-    // the current density-dependent gain; the signed flat term is independent.
+    // Halve light haze (native rho <= .005), then smoothly return to the
+    // approved native strength at .020, the strong-haze preset's mean density.
+    // The gain only rises with density, so stronger weather cannot get clearer.
+    // Apply it to ordinary haze alone: mist height/penetration, water, and the
+    // optional WorldFog envelope retain their own units and existing balance.
     float ordinary = max(density.x, 0.0);
-    ordinary *= drtAirFogStrength(ordinary) * (0.05 + 7.23933 * ordinary);
-    float flatDensity = abs(density.z);
-    flatDensity *= drtFlatFogStrength(flatDensity) * (0.05 + 7.23933 * flatDensity);
+    ordinary *= mix(0.5, 1.0, smoothstep(0.005, 0.020, ordinary));
+    // Keep the height integral for the sky and continuous air/water segments.
+    // For horizontal mist this is exactly the native extra-distance term:
+    // max(-flatDensity * relativePlane, 0) * distance / 60.
     return ordinary * drtHeightIntegral(distance, start.y, end.y, drtAtmosphereView.y)
-        + drtFlatIntegral(distance, start.y, end.y, density.w, sign(density.z) * flatDensity);
+        + drtFlatIntegral(distance, start.y, end.y, density.w, density.z);
 }
 
 float drtFogExposure(float sunlight) {
@@ -169,16 +167,21 @@ float drtFogExposure(float sunlight) {
 }
 
 float drtSurfaceFogExposure(vec3 worldPos, float sunlight) {
-    // The room interval handles enclosure. Do not dim outdoor fog seen through
-    // a window merely because the indoor camera or receiver has low sunlight.
-    if (drtRoomMin.w > 0.5) return 1.0;
+    // Sunlight describes the local air near each endpoint, not the entire ray.
+    // Clearing the whole column for a dark face punched holes in distant fog,
+    // especially when the camera was also shaded. Bound both sheltered lengths
+    // instead; an enclosed room still clears its exact interior in transport.
     float local = drtFogExposure(sunlight);
     float camera = drtFogEnvironment.w > 0.5 ? clamp(drtFogEnvironment.y, 0.0, 1.0) : 0.0;
-    // A distant dark face still has outdoor air in front of it. Restore that
-    // camera exposure over 8..48 blocks instead of cutting holes in the haze.
-    // Both endpoints sheltered retains cave protection at every distance.
-    float outdoorPath = smoothstep(8.0, 48.0, length(worldPos - drtAtmosphereCamera.xyz));
-    return max(local, camera * outdoorPath);
+    float distance = length(worldPos - drtAtmosphereCamera.xyz);
+    float cameraLength = min(distance, 16.0), surfaceLength = min(distance, 8.0);
+    float cameraShelter = 1.0 - camera, surfaceShelter = 1.0 - local;
+    // The union of the two clear intervals: overlap uses the stronger shelter
+    // once. Fully lit rays are unchanged; two dark endpoints clear at most 24m.
+    float overlap = max(cameraLength + surfaceLength - distance, 0.0);
+    float clearLength = cameraShelter * cameraLength + surfaceShelter * surfaceLength
+        - min(cameraShelter, surfaceShelter) * overlap;
+    return clamp(1.0 - clearLength / max(distance, 0.0001), 0.0, 1.0);
 }
 
 // Cloud fragment programs extend horizon concealment without changing physical
@@ -209,9 +212,9 @@ float drtWorldFogTransmittance(float distance) {
     vec4 wf = wf_Density > 0.0 ? vec4(wf_Density, wf_Intensity, wf_FadeStart, wf_FallOff) : drtAtmosphereWorldFog;
     float opacity = wf.x * wf.y *
         (1.0 - exp(-max(wf.w, 0.0) * max(distance - wf.z, 0.0)));
-    // This separate Sheyder haze previously bypassed the air-density rebalance.
-    float density = drtAtmosphereView.z > 0.7 ? drtAirDensity.x : drtFogDensity.x;
-    return 1.0 - drtAirFogStrength(density) * clamp(opacity, 0.0, 1.0);
+    // This optional envelope owns its strength. Ordinary weather must not
+    // silently rescale it when a different haze preset becomes active.
+    return 1.0 - clamp(opacity, 0.0, 1.0);
 }
 
 // Endpoint ratios keep WorldFog's camera-relative fade continuous across media
@@ -229,8 +232,7 @@ float drtAirTransmittance(vec3 start, vec3 end, bool minimumFog, float exposure)
     // so zero sunlight cannot leak substantial weather fog into caves.
     float t = exp(-min(drtAirOpticalDepth(start, end) * exposure, 80.0));
     if (minimumFog && length(end - start) > 0.0001)
-        t *= 1.0 - exposure * drtAirFogStrength(drtAtmosphereView.z > 0.7 ? drtAirDensity.x : drtFogDensity.x)
-            * clamp(drtAtmosphereView.z > 0.7 ? drtAirDensity.y : drtFogDensity.y, 0.0, 1.0);
+        t *= 1.0 - exposure * clamp(drtAtmosphereView.z > 0.7 ? drtAirDensity.y : drtFogDensity.y, 0.0, 1.0);
     return min(t, 1.0 - DRT_MIN_FOG_OPACITY);
 }
 
@@ -243,11 +245,6 @@ float drtWorldFogSegmentTransmittance(vec3 start, vec3 end, float exposure) {
     return pow(drtWorldFogSegmentTransmittance(start, end), exposure);
 }
 
-// Bound the complete dry-weather column, not each ingredient independently.
-// sigma=.20 leaves 67% of scene contrast at two blocks and 13.5% at ten,
-// including extreme valley mist. Ordinary weaker weather keeps its exact curve.
-const float DRT_MAX_WEATHER_EXTINCTION = 0.20;
-
 float drtWeatherOpticalDepth(vec3 p, bool minimumFog) {
     float distance = length(p);
     if (distance < 0.0001) return 0.0;
@@ -255,21 +252,46 @@ float drtWeatherOpticalDepth(vec3 p, bool minimumFog) {
         - log(max(drtWorldFogTransmittance(distance), 0.000001));
     if (minimumFog) {
         vec4 density = drtAtmosphereView.z > 0.7 ? drtAirDensity : drtFogDensity;
-        float opacity = drtAirFogStrength(density.x) * clamp(density.y, 0.0, 1.0);
+        float opacity = clamp(density.y, 0.0, 1.0);
         tau -= log(max(1.0 - opacity, 0.000001));
     }
-    return min(max(tau, 0.0), DRT_MAX_WEATHER_EXTINCTION * distance);
+    // Native weather strength is not globally capped: that workaround hid
+    // the misplaced mist layer while also flattening strong haze presets.
+    return max(tau, 0.0);
 }
 
 float drtWeatherSegmentOpticalDepth(vec3 start, vec3 end, bool minimumFog) {
     // Difference of cumulative columns preserves exact camera-ray composition
     // through water interfaces and froxel slices; per-segment clamps do not.
-    float tau = max(drtWeatherOpticalDepth(end, minimumFog)
+    return max(drtWeatherOpticalDepth(end, minimumFog)
         - drtWeatherOpticalDepth(start, minimumFog), 0.0);
-    // A room's clear prefix is excluded from the available extinction budget.
-    // Otherwise a steep mist layer could spend the room's unused budget in the
-    // first two outdoor blocks. Only sheltered paths need this additional cap.
-    return drtRoomMin.w > 0.5 ? min(tau, DRT_MAX_WEATHER_EXTINCTION * length(end - start)) : tau;
+}
+
+float drtRoomWeatherOpticalDepth(vec3 start, vec3 end, bool minimumFog, float exposure) {
+    float weight = clamp(drtRoomMin.w, 0.0, 1.0);
+    if (weight <= 0.0)
+        return drtWeatherSegmentOpticalDepth(start, end, minimumFog) * max(exposure, 0.0);
+    vec2 outdoor = drtFogOutdoorInterval(start, end);
+    float target = 0.0;
+    if (outdoor.x < outdoor.y) {
+        vec3 a = mix(start, end, outdoor.x), b = mix(start, end, outdoor.y);
+        // Integrating only the outdoor interval keeps the room's clear path
+        // out of the fog column without changing the native weather strength.
+        target = drtWeatherSegmentOpticalDepth(a, b, minimumFog);
+    }
+    if (weight >= 1.0) return target;
+    // Fade optical depth, not the room exit distance: a nearby wall must take
+    // the entire transition to clear, just like the far side of a large room.
+    float original = drtWeatherSegmentOpticalDepth(start, end, minimumFog) * max(exposure, 0.0);
+    return mix(original, target, weight);
+}
+
+float drtRoomWeatherTransmittance(vec3 start, vec3 end, bool minimumFog, float exposure) {
+    if (length(end - start) < 0.0001) return 1.0;
+    float tau = drtRoomWeatherOpticalDepth(start, end, minimumFog, exposure);
+    // Exactly clear interiors stay clear. Required positive vertex-fog metadata
+    // is supplied by drtFogOpacity, independently of visible air transport.
+    return exp(-min(tau, 80.0));
 }
 
 float drtWeatherTransmittance(vec3 start, vec3 end, bool minimumFog, float exposure) {
@@ -287,10 +309,13 @@ float drtFogOpacity(vec3 worldPos, bool boundary, float sunlight) {
     if (drtFogColor.w < 0.5) return DRT_MIN_FOG_OPACITY;
     vec3 p = worldPos - drtAtmosphereCamera.xyz;
     float exposure = drtSurfaceFogExposure(worldPos, sunlight);
-    vec2 outdoor = drtFogOutdoorInterval(vec3(0.0), p);
-    if (outdoor.x >= outdoor.y) return DRT_MIN_FOG_OPACITY;
-    float t = drtWeatherTransmittance(p * outdoor.x, p * outdoor.y, true, exposure);
-    if (boundary) t *= mix(1.0, drtBoundaryTransmittance(length(p.xz)), exposure);
+    float t = drtRoomWeatherTransmittance(vec3(0.0), p, true, exposure);
+    if (boundary) {
+        float boundaryT = drtBoundaryTransmittance(length(p.xz));
+        // Nearby room rays never reach horizon concealment. Avoid traversing
+        // an irregular room a second time when its boundary factor is identity.
+        if (boundaryT < 1.0) t *= mix(1.0, boundaryT, drtRoomBoundaryExposure(p, exposure));
+    }
     return max(DRT_MIN_FOG_OPACITY, 1.0 - t);
 }
 

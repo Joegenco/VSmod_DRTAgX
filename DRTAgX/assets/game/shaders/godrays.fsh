@@ -14,6 +14,12 @@ uniform float bloomSoftKnee  = 0.5; // Knee width for smooth transition curve
 uniform float bloomIntensity = 0.1; // Overall bloom scale
 
 in vec2 texCoord;
+// Native vertex outputs and their matching fragment contract remain available
+// to other shader patches even though DRTAgX now extracts bloom in this pass.
+in vec3 sunPosScreen;
+in float iGlobalTime;
+in float intensity;
+in float direction;
 out vec4 outColor;
 
 // Rec.709 Luminance

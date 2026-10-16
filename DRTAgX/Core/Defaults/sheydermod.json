@@ -108,9 +108,9 @@
     "Enabled": true,
     "Lanterns": true,
     "LanternMode": 2,
-    "DirectionalSunlight": false,
-    "ShadowBrightness": 0.7,
-    "AmbientFloor": 0.07,
+    "DirectionalSunlight": true,
+    "ShadowBrightness": 0.6,
+    "AmbientFloor": 0.17,
     "RangeBlocks": 96
   },
   "Overexposure": {

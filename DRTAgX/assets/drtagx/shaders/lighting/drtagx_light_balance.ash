@@ -186,6 +186,27 @@ float drtCombineSunDarkening(float shadowBrightness, float faceBrightness) {
     return 1.0 - darkness;
 }
 
+float drtLeafSunBrightness(vec3 normalWorld, vec3 sunDirection) {
+    // Leaf material alone uses this additional facing shade. The actual sun
+    // direction is normalized by the calendar; moonlight and the horizon stay
+    // unchanged. Fully back-facing leaves lose at most half their sunlight.
+    float daylight = smoothstep(0.0, 0.10, sunDirection.y);
+    float normalLength2 = dot(normalWorld, normalWorld);
+    if (daylight <= 0.0 || !(normalLength2 > 1e-8) || isinf(normalLength2)) return 1.0;
+    vec3 unitNormal = normalWorld * inversesqrt(normalLength2);
+    float away = smoothstep(0.0, 0.75, -dot(unitNormal, sunDirection));
+    return 1.0 - 0.5 * daylight * away;
+}
+
+// Deferred glow.G already owns negative contact/specular classes (-2..-11).
+// A separate +16 magnitude tags leaf material without borrowing normal-W's
+// exact PLS token or its signed foliage/backlight payload. Strip it before
+// interpreting the original class, including screen-space contact samples.
+const float DRT_DEFERRED_LEAF_TAG = 16.0;
+float drtStripDeferredLeafTag(float payload) {
+    return payload + DRT_DEFERRED_LEAF_TAG * step(DRT_DEFERRED_LEAF_TAG, -payload);
+}
+
 // Continuous deferred sun occupies 0..63; leave a full unit before the +64
 // caster tag and +128 forward-foliage tag. RGBA16F retains about 1000 steps
 // even with +64, instead of rounding the interpolated value to 32 levels.

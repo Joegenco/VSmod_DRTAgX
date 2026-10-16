@@ -2,10 +2,12 @@
 #extension GL_ARB_explicit_attrib_location: enable
 #extension GL_ARB_shader_storage_buffer_object: require
 #extension GL_ARB_shading_language_420pack: require
+#extension GL_ARB_shader_image_load_store: require
 
 // FpHands compiles this source against cached native includes before mod startup.
 // Preserve native GLSL overload resolution; explicitly enable only the SSBO and
-// binding qualifiers required by the read-only placed-light receiver below.
+// binding/storage qualifiers required by the read-only placed-light receiver below.
+// Strict GLSL 330 compilers require image_load_store for the readonly qualifier.
 
 // SheyderMod: vendored engine standard.fsh (generic block / item / entity pass) with a mod hook:
 // the Specular highlight (inlined here, not #included, because FpHands recompiles this shader
@@ -174,6 +176,7 @@ void drtComposeAstraSprite(vec4 texColor) {
 }
 #endif
 
+// DRT_MODEL_RECEIVER_INSERT
 void main() {
 #ifdef DRT_EXPLICIT_SURFACE_LIGHTING
     // Derivative plane is local to this rasterized model, not an inferred cache key.

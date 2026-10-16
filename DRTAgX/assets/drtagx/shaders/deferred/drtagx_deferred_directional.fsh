@@ -45,7 +45,10 @@ float drtFoliageContact(vec3 receiverView, vec3 receiverNormalView)
         // Deferred no-cull contact casters use -6..-11 in glow.g, including
         // static cards. Keep their existing contact behavior independent of
         // placed-light classification; forward foliage uses +128 in glow.b.
-        if (glowAtHit.g > -5.5 && glowAtHit.b < 128.0) continue;
+        // Leaf material does not change whether this surface casts contact
+        // shadows. Remove its separate tag before testing the original class.
+        float contactClass = drtStripDeferredLeafTag(glowAtHit.g);
+        if (contactClass > -5.5 && glowAtHit.b < 128.0) continue;
 
         float depth = texelFetch(gDepth, pixel, 0).r;
         if (depth >= 1.0) continue;

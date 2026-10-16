@@ -7,6 +7,22 @@ void drtMovingFace(vec3 q,int face,out vec2 side,out float forward) {
     else if(face==4){side=vec2(-q.x,-q.y);forward=q.z;}
     else{side=vec2(q.x,-q.y);forward=-q.z;}
 }
+vec2 drtMovingGather(vec2 cell,vec2 origin,vec2 atlasSize,vec2 size,vec3 shadow,vec2 gradient) {
+    // GLSL gather order is (0,1), (1,1), (1,0), (0,0). Read raw depth so
+    // every texel can compare its own receiver plane, even at grazing contact.
+    // Hardware PCF shares one reference and would require a leaking slope bias.
+    vec4 stored=textureGather(drtShadowMaps,(origin+cell+1.0)/atlasSize);
+    vec4 dx=fma(vec4(-shadow.x),vec4(size.x),cell.x+vec4(0.5,1.5,1.5,0.5));
+    vec4 dy=fma(vec4(-shadow.y),vec4(size.y),cell.y+vec4(1.5,1.5,0.5,0.5));
+    vec4 depth=fma(vec4(gradient.x),dx/size.x,fma(vec4(gradient.y),dy/size.y,vec4(shadow.z)));
+    // Radius-two separable tent: [1,2,1]/4 at texel centres, with continuous
+    // subtexel weights. A hard edge now transitions over three texels, not one.
+    vec4 weight=max(vec4(0),2.0-abs(dx))*max(vec4(0),2.0-abs(dy));
+    // A projected plane outside [0,1] has no represented receiver. Omit that
+    // weight instead of blending a clipped ray into a valid contact shadow.
+    weight*=vec4(greaterThanEqual(depth,vec4(0)))*vec4(lessThanEqual(depth,vec4(1)));
+    return vec2(dot(weight,step(depth-0.00000024,stored)),dot(weight,vec4(1)));
+}
 float drtMovingPcf(vec3 shadow,vec2 gradient,int slot,int face,bool held) {
     vec2 size=held?drtMovingHeldSize:vec2(drtMovingAtlasInfo.z);
     float stride=drtMovingAtlasInfo.w;
@@ -19,6 +35,18 @@ float drtMovingPcf(vec3 shadow,vec2 gradient,int slot,int face,bool held) {
     vec2 atlasSize=drtMovingAtlasInfo.xy;
     vec2 receiverPixel=shadow.xy*size-0.5;
     vec2 pixel=clamp(receiverPixel,vec2(0),size-1.0);
+    // Four gathers cover all sixteen neighbours without a new texture/pass.
+    // Clamp the complete footprint inside this face, never into atlas gutters
+    // or an adjacent light. The tent naturally renormalizes at face boundaries.
+    if(all(greaterThanEqual(size,vec2(4)))) {
+        vec2 base=clamp(floor(pixel)-1.0,vec2(0),size-4.0);
+        vec2 sum=vec2(0);
+        for(int y=0;y<=1;++y)for(int x=0;x<=1;++x)
+            sum+=drtMovingGather(base+2.0*vec2(x,y),origin,atlasSize,size,shadow,gradient);
+        return sum.y>1e-6?clamp(sum.x/sum.y,0.0,1.0):1.0;
+    }
+    // Extremely small minimized-window hand maps retain bounded exact bilinear
+    // comparisons; a 4x4 gather footprint cannot fit inside those allocations.
     vec2 base=floor(pixel),fraction=fract(pixel);
     float visibility=0.0,weightSum=0.0;
     // Each comparison samples an exact texel center and follows the receiver
@@ -37,7 +65,7 @@ float drtMovingPcf(vec3 shadow,vec2 gradient,int slot,int face,bool held) {
         // texel. Such rays have no represented receiver, so omit their weight
         // instead of turning them into opaque wedges or diluting valid taps.
         if(depth<0.0||depth>1.0)continue;
-        visibility+=weight*texture(drtShadowMaps,vec3((origin+cell+0.5)/atlasSize,depth-0.00000024));
+        visibility+=weight*step(depth-0.00000024,texelFetch(drtShadowMaps,ivec2(origin+cell),0).r);
         weightSum+=weight;
     }
     return weightSum>1e-6?visibility/weightSum:1.0;
@@ -46,7 +74,7 @@ float drtMovingCubeFace(vec3 q,vec3 normal,float planeDistance,int slot,int face
     vec2 side,nside;float forward,nforward;
     drtMovingFace(q,face,side,forward);drtMovingFace(normal,face,nside,nforward);
     if(forward<=0.1)return 1.0;
-    float farPlane=drtShadowRange[slot]+0.5;
+    float farPlane=min(drtShadowRange[slot]+0.5,32.0);
     float a=(farPlane+0.1)/(0.1-farPlane),b=0.2*farPlane/(0.1-farPlane);
     vec3 shadow=vec3(0.5+0.47*side/forward,0.5*(1.0-a+b/forward));
     if(any(lessThan(shadow,vec3(0)))||any(greaterThan(shadow,vec3(1))))return 1.0;
@@ -101,7 +129,7 @@ float drtMovingVisibility(vec3 receiver,vec3 emitter,int lightIndex,vec3 unitNor
         if(clip.w<=0.0)return 1.0;
         vec3 shadow=clip.xyz/clip.w*0.5+0.5;
         if(any(lessThan(shadow,vec3(0)))||any(greaterThan(shadow,vec3(1))))return 1.0;
-        float farPlane=drtShadowRange[slot]+0.5,b=2.0*farPlane*0.005/(0.005-farPlane);
+        float farPlane=min(drtShadowRange[slot]+0.5,32.0),b=2.0*farPlane*0.005/(0.005-farPlane);
         vec2 gradient=b*unitNormal.xy/(vec2(matrix[0][0],matrix[1][1])*planeDistance);
         float visibility=drtMovingPcf(shadow,gradient,slot,0,true);
         // The single held projector intentionally has finite angular coverage.

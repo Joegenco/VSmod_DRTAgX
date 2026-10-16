@@ -12,6 +12,12 @@ flat in int drtShadowWindMode;
 out vec4 outColor;
 
 void main () {
+#ifdef DRT_MOVING_SHADOWS
+    // The point-only geometry stage supplies an emitter-relative vector.
+    // Axial far clipping alone includes distant cube corners; reject those
+    // fragments before texture sampling without changing native/placed maps.
+    if (dot(drtShadowLocalPos, drtShadowLocalPos) > 32.0 * 32.0) discard;
+#endif
 	if (drtExcludeEmitter != 0) {
 		vec3 localPosition = drtShadowLocalPos - drtEmitterBlockMin;
 		// Classify the owning voxel, including every boundary face of the

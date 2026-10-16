@@ -13,11 +13,11 @@ internal sealed class PlacedLightSurfaceBindings(PlacedLightSurfaceCache cache, 
     private readonly Dictionary<int, Locations?> _locations = new();
     private readonly double[] _inverse = new double[16];
     private readonly Vec3d _camera = new();
-    private bool _bound;
+    private bool _bound, _memoBound, _writeBarrier;
     private int _generic, _texture, _sampler;
     private IndexedBufferState _memo, _sources;
 
-    private sealed class Locations(int program, int enabled)
+    private sealed class Locations(int program, int enabled, int animatedBlock)
     {
         internal readonly int Enabled = enabled;
         internal readonly int Generation = GL.GetUniformLocation(program, "drtMemoGeneration");
@@ -35,6 +35,18 @@ internal sealed class PlacedLightSurfaceBindings(PlacedLightSurfaceCache cache, 
         internal readonly int BoundsMax = GL.GetUniformLocation(program, "drtMemoBoundsMax");
         internal readonly int Regions = GL.GetUniformLocation(program, "drtMemoRegionsEnabled");
         internal readonly int Transition = GL.GetUniformLocation(program, "drtMemoTransitionFrames");
+
+        internal readonly int AnimatedBlock = animatedBlock;
+        internal readonly bool UsesReceiverPlane = GL.GetUniformLocation(program, "drtReceiverPlaneReady") >= 0;
+
+        // The owned model helper declares this source-only block readonly and
+        // has no page buffer. Check the linked interface once, rather than infer
+        // resource use from a pass name or borrow the full page cache per model.
+        internal readonly bool SourceOnlyReceiver =
+            GL.GetProgramResourceIndex(program, ProgramInterface.ShaderStorageBlock,
+                "DrtPlacedReceiverSources") >= 0 &&
+            GL.GetProgramResourceIndex(program, ProgramInterface.ShaderStorageBlock,
+                "DrtPlacedMemoBuffer") < 0;
     }
 
     internal void Bind(int program)
@@ -43,15 +55,35 @@ internal sealed class PlacedLightSurfaceBindings(PlacedLightSurfaceCache cache, 
         if (!_locations.TryGetValue(program, out var locations))
         {
             int enabled = GL.GetUniformLocation(program, "drtMemoEnabled");
-            locations = enabled >= 0 ? new Locations(program, enabled) : null;
+            int animatedBlock = GL.GetUniformLocation(program, "drtAnimatedBlockDraw");
+            locations = enabled >= 0 || animatedBlock >= 0 ? new Locations(program, enabled, animatedBlock) : null;
             _locations.Add(program, locations);
         }
 
         if (locations == null) return;
+        bool blockDraw = AnimatedBlockLightingScope.Active;
+        // Native Use is reached only for an actual draw. The renderer scope is
+        // CPU-only, so distant/culled callbacks no longer write both shader
+        // programs. Reassert zero here for every subsequent creature/hand draw,
+        // including PLS-off variants where the memo uniform is optimized away.
+        if (locations.AnimatedBlock >= 0) GL.Uniform1(locations.AnimatedBlock, blockDraw ? 1 : 0);
+        if (locations.Enabled < 0) return;
+
         // 0 is reserved for explicit cache-off comparisons. Allocation/reload
         // failures use 2 (native lighting), never unbounded legacy receiver work.
-        int mode = cache.Active && cache.Ready ? 1 : 2;
+        // Empty snapshots cannot illuminate anything. Keep the native result
+        // without querying/binding GL resources for hundreds of model draws.
+        bool receiving = locations.AnimatedBlock < 0 || blockDraw;
+        // Source publication follows terrain geometry. If an empty scene gains
+        // its first light mid-frame, the deferred reader must not consume stale
+        // plane/bounds textures from an earlier frame. Native/model receivers
+        // without this owned plane contract continue using their own geometry.
+        receiving &= !locations.UsesReceiverPlane || DeferredReceiverResources.Current is { Ready: true };
+        int mode = cache.Active && cache.Ready && cache.SourceCount > 0 && receiving ? 1 : 2;
         GL.Uniform1(locations.Enabled, mode);
+        // Clear stale counts on all disabled paths, including ordinary mobs
+        // sharing the model shader and the frame after the last light is gone.
+        if (locations.Count >= 0) GL.Uniform1(locations.Count, mode == 1 ? cache.SourceCount : 0);
         if (mode != 1) return;
         if (locations.Generation >= 0) GL.Uniform1(locations.Generation, cache.Generation);
         if (locations.Frame >= 0) GL.Uniform1(locations.Frame, cache.Frame);
@@ -60,7 +92,6 @@ internal sealed class PlacedLightSurfaceBindings(PlacedLightSurfaceCache cache, 
         if (locations.Diagnostics >= 0) GL.Uniform1(locations.Diagnostics, cache.Diagnostics ? 1 : 0);
         if (locations.Anchor >= 0)
             GL.Uniform3(locations.Anchor, cache.AnchorCellX, cache.AnchorCellY, cache.AnchorCellZ);
-        if (locations.Count >= 0) GL.Uniform1(locations.Count, cache.SourceCount);
         if (locations.RegionOffset >= 0)
             GL.Uniform1(locations.RegionOffset, PlacedLightSurfaceCache.SourcePrefixBytes / 16);
         if (locations.Maps >= 0) GL.Uniform1(locations.Maps, 14);
@@ -78,14 +109,16 @@ internal sealed class PlacedLightSurfaceBindings(PlacedLightSurfaceCache cache, 
         }
 
         _generic = GL.GetInteger(GetPName.ShaderStorageBufferBinding);
-        _memo = IndexedBufferState.Capture(BufferRangeTarget.ShaderStorageBuffer, 6);
+        _memoBound = !locations.SourceOnlyReceiver;
+        _writeBarrier = !locations.SourceOnlyReceiver;
+        if (_memoBound) _memo = IndexedBufferState.Capture(BufferRangeTarget.ShaderStorageBuffer, 6);
         _sources = IndexedBufferState.Capture(BufferRangeTarget.ShaderStorageBuffer, 7);
         int active = GL.GetInteger(GetPName.ActiveTexture);
         GL.ActiveTexture(TextureUnit.Texture14);
         _texture = GL.GetInteger(GetPName.TextureBinding2DArray);
         _sampler = GL.GetInteger(GetPName.SamplerBinding);
         _bound = true;
-        GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 6, cache.Buffer);
+        if (_memoBound) GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 6, cache.Buffer);
         GL.BindBufferBase(BufferRangeTarget.ShaderStorageBuffer, 7, cache.SourceBuffer);
         GL.BindSampler(14, 0);
         GL.BindTexture(TextureTarget.Texture2DArray, cache.ShadowTexture);
@@ -96,18 +129,20 @@ internal sealed class PlacedLightSurfaceBindings(PlacedLightSurfaceCache cache, 
     internal void Restore()
     {
         if (!_bound) return;
-        // GLSL publishes each record before READY; this native barrier makes
-        // fragment writes visible to following draws/passes and the next frame.
-        GL.MemoryBarrier(MemoryBarrierFlags.ShaderStorageBarrierBit);
+        // Source-only model receivers never publish pages or atomics. Their
+        // producer already fences completed compute writes; inserting a write
+        // barrier after each read-only model needlessly serializes submissions.
+        // Retain the existing barrier for every other/unknown cache consumer.
+        if (_writeBarrier) GL.MemoryBarrier(MemoryBarrierFlags.ShaderStorageBarrierBit);
         int active = GL.GetInteger(GetPName.ActiveTexture);
         GL.ActiveTexture(TextureUnit.Texture14);
         GL.BindTexture(TextureTarget.Texture2DArray, _texture);
         GL.BindSampler(14, _sampler);
         GL.ActiveTexture((TextureUnit)active);
-        _memo.Restore();
+        if (_memoBound) _memo.Restore();
         _sources.Restore();
         GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _generic);
-        _bound = false;
+        _bound = _memoBound = _writeBarrier = false;
     }
 
     internal void Reload()

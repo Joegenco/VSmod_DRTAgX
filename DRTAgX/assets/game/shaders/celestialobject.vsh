@@ -19,6 +19,11 @@ out vec3 vertexPosition;
 out vec4 rgbaFog;
 out vec2 uv;
 out vec4 color;
+#if SSAOLEVEL > 0
+// Retain the native celestial stage interface for SSAO-aware shader patches.
+out vec4 fragPosition;
+out vec4 gnormal;
+#endif
 
 #include vertexflagbits.ash
 #include shadowcoords.vsh
@@ -28,6 +33,10 @@ void main(void)
 {
 	vec4 worldPos = modelMatrix * vec4(vertexPositionIn, 1.0);
 	vec4 cameraPos = viewMatrix * worldPos;
+#if SSAOLEVEL > 0
+	fragPosition = cameraPos;
+	gnormal = vec4(0.0); // Celestial sprites have no opaque surface normal.
+#endif
 	uv = uvIn;
 	glowLevel = (extraGlow + (flags & 0xff)) / 128.0;
 	color = colorIn;	

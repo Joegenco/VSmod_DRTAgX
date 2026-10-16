@@ -47,6 +47,7 @@ internal sealed partial class StaticTerrainShadowMaps : IDisposable
     private static readonly float[] LightOrigin = { 0f, 0f, 0f };
     private readonly MovingLightShadowRenderer _terrainDraws;
     private readonly PointTerrainShadowProgram _pointProgram = new("drtagx_static_point_shadowmap");
+    private readonly StableContainerShadowRenderer _containerShadows = new("drtagx_static_container_shadow");
     private int _excludeWindLocation;
     private readonly Slot[] _slots = new Slot[MaxDepthSources];
     private readonly Stack<int> _free = new(MaxDepthSources);
@@ -195,6 +196,7 @@ internal sealed partial class StaticTerrainShadowMaps : IDisposable
         // Retire old program IDs/partial work while retaining completed depth.
         CancelStage();
         _pointProgram.Reload();
+        _containerShadows.Reload();
         _shadowProgram = 0;
         _nextSchedulerWake = 0;
     }
@@ -202,6 +204,7 @@ internal sealed partial class StaticTerrainShadowMaps : IDisposable
     internal void Invalidate()
     {
         _pointProgram.Reload();
+        _containerShadows.Reload();
         DepthGeneration++;
         LastPromotionDepthGeneration = -1;
         ResetPromotionBatch();
@@ -397,6 +400,11 @@ internal sealed partial class StaticTerrainShadowMaps : IDisposable
         GL.ColorMask(false, false, false, false);
         try
         {
+            // Native containers remain in one visible renderer. Their opaque
+            // base vertices supply a separate closed/rest depth caster, shared
+            // across all six faces and unchanged when the lid animates.
+            if (!_containerShadows.Prepare(api, worldPosition, worldPosition, Range, null, excludeEmitter: true))
+                return false;
             shader.Use();
             if (_excludeWindLocation >= 0) GL.Uniform1(_excludeWindLocation, 1);
             GL.Uniform1(atlas, 0);
@@ -431,6 +439,7 @@ internal sealed partial class StaticTerrainShadowMaps : IDisposable
                     MovingLightShadowRenderer.Directions[face], Range, _scratchView, _scratchProj, _scratchLightMatrix);
                 GL.UniformMatrix4(mvp, 1, false, _scratchLightMatrix);
                 _terrainDraws.Casters.Draw(face);
+                _containerShadows.Draw(api, shader, -1, face, _scratchLightMatrix);
                 FacesBakedThisFrame++;
             }
 
@@ -451,6 +460,7 @@ internal sealed partial class StaticTerrainShadowMaps : IDisposable
             try
             {
                 _terrainDraws.Casters.End();
+                _containerShadows.End();
             }
             finally
             {
@@ -472,6 +482,7 @@ internal sealed partial class StaticTerrainShadowMaps : IDisposable
     public void Dispose()
     {
         _pointProgram.Dispose();
+        _containerShadows.Dispose();
 
         if (_framebuffer != 0) GL.DeleteFramebuffer(_framebuffer);
         if (_texture != 0) GL.DeleteTexture(_texture);

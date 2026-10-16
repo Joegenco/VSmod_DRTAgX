@@ -12,6 +12,8 @@ namespace DRTAgX;
 internal sealed class MovingLightShadowRenderer : IDisposable
 {
     private const int BaseSize = 192, MaxLights = 10, TextureUnitNumber = 15;
+    private const float MaxSourceDistance = 42f;
+    internal const float MaxShadowDistance = 32f;
 
     // Apply after quantization/capping so every render resolution is exactly
     // half the accepted overhaul size. Set to 1 to restore that size schedule.
@@ -23,9 +25,13 @@ internal sealed class MovingLightShadowRenderer : IDisposable
         (0, 0, -1, 0, -1, 0)
     };
 
-    internal readonly TerrainCasterBatch Casters = new();
-    private readonly PointTerrainShadowProgram _pointProgram = new("drtagx_moving_point_shadowmap");
+    internal readonly TerrainCasterBatch Casters = new(precomputeMovingDraws: true);
+    private readonly PointTerrainShadowProgram _pointProgram = new("drtagx_moving_point_shadowmap", moving: true);
     private readonly MovingEntityShadowRenderer _entityShadows = new();
+
+    private readonly StableContainerShadowRenderer _containerShadows =
+        new("drtagx_moving_container_shadow", moving: true);
+
     private readonly HeldProjectionFit _fit = new();
     private readonly ShadowGlState _state = new(false);
 
@@ -73,6 +79,11 @@ internal sealed class MovingLightShadowRenderer : IDisposable
         return float.IsFinite(range) && range > 1e-6f ? Math.Clamp(range, 16f, 32f) : 0f;
     }
 
+    // Keep the receiver/filter guard for shorter lights, but never prepare or
+    // project beyond the moving caster limit. Fragment radial rejection also
+    // removes cube corners lying outside this sphere, despite their axial depth.
+    internal static float ShadowExtent(float range) => MathF.Min(range + .5f, MaxShadowDistance);
+
     internal static float SelectionScore(float[] p, float[] c, MovingLightKind kind)
     {
         float value = c[0] + c[1] + c[2];
@@ -105,6 +116,12 @@ internal sealed class MovingLightShadowRenderer : IDisposable
         {
             var p = positions[i];
             var c = colors[i];
+            _sourceRanges[i] = 0f;
+            // Published positions are current eye-space coordinates. Cull before
+            // ranking/preparing casters so distant emitters consume no shadow
+            // slots or draws. Their independently published illumination remains.
+            // The positive comparison also rejects invalid positions (NaN/Inf).
+            if (!(Dist2(p[0], p[1], p[2]) <= MaxSourceDistance * MaxSourceDistance)) continue;
             _sourceRanges[i] = Reach(c);
             if (_sourceRanges[i] <= 0) continue;
             float score = SelectionScore(p, c, sourceKinds[i]);
@@ -226,8 +243,9 @@ internal sealed class MovingLightShadowRenderer : IDisposable
                     int slot = _slots[i];
                     if (slot < 0) continue;
                     GetWorldLightPosition(positions[i]);
-                    float range = _ranges[slot] + .5f;
-                    Casters.Prepare(_renderOrigin, _lightWorld, range, camera);
+                    float range = ShadowExtent(_ranges[slot]);
+                    Casters.Prepare(_renderOrigin, _lightWorld, range, camera, cubeFaces: _kinds[slot] == 0);
+                    _containerShadows.Prepare(api, _renderOrigin, _lightWorld, range, camera);
                     int stride = _size + 8, sx = slot % _columns * 2 * stride, sy = slot / _columns * 3 * stride;
                     if (_kinds[slot] > 0)
                     {
@@ -241,6 +259,7 @@ internal sealed class MovingLightShadowRenderer : IDisposable
                         DrawGroups += Casters.Draw(-1);
                         DrawGroups += _entityShadows.Draw(api, shader, _kinds[slot] - 1, -1,
                             camera, positions[i], range);
+                        DrawGroups += _containerShadows.Draw(api, shader, _kinds[slot] - 1, -1, camera);
                         Projections++;
                         continue;
                     }
@@ -262,6 +281,7 @@ internal sealed class MovingLightShadowRenderer : IDisposable
                         DrawGroups += Casters.Draw(face);
                         DrawGroups += _entityShadows.Draw(api, shader, -1, face,
                             _scratchMeshMatrix, positions[i], range);
+                        DrawGroups += _containerShadows.Draw(api, shader, -1, face, _scratchMeshMatrix);
                         Projections++;
                     }
                 }
@@ -285,6 +305,7 @@ internal sealed class MovingLightShadowRenderer : IDisposable
         finally
         {
             _entityShadows.End();
+            _containerShadows.End();
             shader.Stop();
             previous?.Use();
             _state.Dispose();
@@ -511,8 +532,10 @@ internal sealed class MovingLightShadowRenderer : IDisposable
                 (int)TextureWrapMode.ClampToEdge);
             GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT,
                 (int)TextureWrapMode.ClampToEdge);
+            // Deferred gathers raw D24 and compares each texel against its own
+            // receiver plane; hardware comparison would share one depth value.
             GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureCompareMode,
-                (int)TextureCompareMode.CompareRefToTexture);
+                (int)TextureCompareMode.None);
             GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureCompareFunc,
                 (int)DepthFunction.Lequal);
             fbo = GL.GenFramebuffer();
@@ -632,16 +655,18 @@ internal sealed class MovingLightShadowRenderer : IDisposable
         _fit.Reload();
         _pointProgram.Reload();
         _entityShadows.Reload();
+        _containerShadows.Reload();
         _warned = false;
     }
 
     public void Dispose()
     {
         ReleaseTextureBinding();
-        Casters.End();
+        Casters.Dispose();
         _fit.Dispose();
         _pointProgram.Dispose();
         _entityShadows.Dispose();
+        _containerShadows.Dispose();
         if (_depthAtlas != 0) GL.DeleteTexture(_depthAtlas);
         if (_framebuffer != 0) GL.DeleteFramebuffer(_framebuffer);
         _depthAtlas = _framebuffer = _size = _capacity = 0;

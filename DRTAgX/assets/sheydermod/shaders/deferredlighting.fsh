@@ -101,6 +101,11 @@ void main(void)
     vec4 color   = texture(gColor, texcoord);
     vec4 glowVec = texture(gGlow, texcoord);
 
+    // Material tagging is independent of wind/contact/caster classification.
+    // Restore the original negative class before all existing decoding below.
+    bool leafMaterial = -glowVec.g >= DRT_DEFERRED_LEAF_TAG;
+    glowVec.g = drtStripDeferredLeafTag(glowVec.g);
+
     float mark = clamp(-glowVec.g - 1.0, 0.0, 1.0);
 
     vec4 ptColor = color;
@@ -217,9 +222,11 @@ void main(void)
     }
 #endif
 
-    if (!drtAuthoredPlaneValid && grassTag + foliageTag < 0.5 && !placedPrepared) {
+    if (drtMemoEnabled == 1 && drtMemoSourceCount > 0 &&
+        !drtAuthoredPlaneValid && grassTag + foliageTag < 0.5 && !placedPrepared) {
         // Unsupported models can have quantized or synthetic authored normals.
         // Recover their actual receiving plane without a pixel-area cutoff.
+        // Empty-source/native-fallback frames never consume this PLS-only normal.
         float dx2 = dot(drtReceiverDx, drtReceiverDx), dy2 = dot(drtReceiverDy, drtReceiverDy);
         if (min(dx2, dy2) > 1e-30) {
             vec3 plane = cross(drtReceiverDx * inversesqrt(dx2), drtReceiverDy * inversesqrt(dy2));
@@ -265,6 +272,10 @@ void main(void)
     vec2 foliageLighting = drtSunUnpackFoliageLighting(nrm4.w);
     float baseNb = noCullTag > 0.5 ? foliageLighting.x : getBrightnessFromNormal(normal, 1.0, intensity);
     float nb = baseNb; // Common compositor applies access to sunlight only.
+    // No-cull normal XYZ is the physically oriented receiving plane; ordinary
+    // terrain keeps its authored normal and exact PLS identity unchanged.
+    if (leafMaterial && drtFogColor.w > 0.5)
+        nb = min(nb, drtLeafSunBrightness(normal, drtAtmosphereSun.xyz));
 
     outColor = applyFogAndShadowFromBrightness(vec4(albedo, 1.0),
         fogAmount, drtCombineSunDarkening(b, nb), worldPos.xyz);

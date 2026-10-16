@@ -32,7 +32,11 @@ internal sealed class AtmosphereRoomFallback
     {
         // Cardinal hits alone can describe four posts under a roof. Check a
         // small grid on all six boundary planes as well; no flood or frame work.
+        // Large halls can exceed the native room limit. Allow a small doorway
+        // or window in their walls, while requiring a complete floor and roof.
         foreach (var face in BlockFacing.ALLFACES)
+        {
+            var openings = 0;
             for (int a = 0; a < 3; a++)
             for (int b = 0; b < 3; b++)
             {
@@ -53,8 +57,11 @@ internal sealed class AtmosphereRoomFallback
                 if (!IsLoaded(blocks, _next)) return false;
                 var outside = blocks.GetBlock(_next);
                 if (IsFoliage(outside) || outside.GetRetention(_next, face.Opposite, EnumRetentionType.Heat) == 0)
-                    return false;
+                {
+                    if (face.Axis == EnumAxis.Y || ++openings > 2) return false;
+                }
             }
+        }
 
         return true;
     }

@@ -78,6 +78,11 @@ internal sealed class PlacedLightQualityShaders : IDisposable
         IShader? shader = shaderType == EnumShaderType.FragmentShader ? program.FragmentShader :
             shaderType == EnumShaderType.VertexShader ? program.VertexShader : null;
         if (shader == null) return;
+        // Native includes are expanded now, but compilation has not started.
+        // Restore owned model receivers after any asset refresh lost their
+        // startup injection; early native/bootstrap programs stay untouched.
+        if (shaderType == EnumShaderType.FragmentShader)
+            FogAndLightAssetBridge.InstallLoadedModelReceiver(_instance._api, program.PassName, shader);
         if (_instance._performance && !(shader.PrefixCode ?? string.Empty).Contains(Define, StringComparison.Ordinal))
             shader.PrefixCode += Define;
         // Shipping receiver programs omit the unreachable legacy lamp loops.

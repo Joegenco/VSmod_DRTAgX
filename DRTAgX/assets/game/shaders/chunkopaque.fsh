@@ -20,9 +20,10 @@
 // ----------------------------------------------------------------------------
 // G-Buffer Output Layout:
 //   outColor     (location 0) : Private voxel + own-emission illumination when the paired resource owner enables it; otherwise prelit albedo (RGBA).
-//   outGlow      (location 1) : [r: glowLevel, g: -(2.0 + specD + contactClass), b: encodedB, a: fogAmount + alpha].
+//   outGlow      (location 1) : [r: glowLevel, g: -(2.0 + specD + contactClass + leafTag), b: encodedB, a: fogAmount + alpha].
 //                               - encodedB: continuousSunAccess * 63.0 + (isSolidCaster ? 64.0 : 0.0)
 //                               - contactClass: 8.0 = static no-cull, 6.0 = grass receiver, 4.0 = wind foliage, 2.0 = solid terrain, 0.0 = alpha-test
+//                               - leafTag: 16.0 for CPU-classified leaf material; independent of contact/caster/wind class
 //   outGNormal   (location 2) : View normal (actual plane for no-cull); no-cull W packs sunlight shade/backlight class.
 //   outGPosition (location 3) : Raw unlit albedo for subsurface scattering and depth reconstruction.
 // ============================================================================
@@ -36,6 +37,7 @@ in float fogAmount;
 in vec2 uv;
 in float glowLevel;
 flat in int renderFlags;
+flat in int drtLeafMaterial;
 in float drtWindPresence;
 in vec3 drtPlacedRestPos;
 in vec3 normal;
@@ -204,7 +206,8 @@ void sm_deferredFill(vec4 texColor, vec3 rawAlbedo)
         outGNormal.w = drtSunPackFoliageLighting(nb, gnw);
     }
 #endif
-    outGlow = vec4(glowLevel, -(2.0 + specD + contactClass), encodedB,
+    float leafTag = drtLeafMaterial != 0 ? DRT_DEFERRED_LEAF_TAG : 0.0;
+    outGlow = vec4(glowLevel, -(2.0 + specD + contactClass + leafTag), encodedB,
         min(1.0, fogAmount + texColor.a));
 }
 
@@ -281,11 +284,19 @@ void main()
     // This plane is geometric, independently of the grid toggle or material shade.
     drtForwardSunPlaneNormal = drtTerrainSunPlaneNormal;
     float b = getBrightnessFromShadowMap();
+    // No-cull leaves use the same physically oriented geometric plane stored
+    // for deferred sunlight. Other materials retain their authored shade, and
+    // local light/emission never receive this daytime-only maximum darkness.
+    float faceBrightness = nb;
+    if (drtLeafMaterial != 0 && drtFogColor.w > 0.5)
+        faceBrightness = min(faceBrightness,
+            drtLeafSunBrightness(drtTerrainSunPlaneNormal, drtAtmosphereSun.xyz));
 #ifdef DRT_ALBEDO_SURFACE_LIGHTING
     outColor = applyFogAndShadowFromBrightness(vec4(mappedTex.rgb, texColor.a), fogAmount,
-        drtCombineSunDarkening(b, nb), worldPos.xyz);
+        drtCombineSunDarkening(b, faceBrightness), worldPos.xyz);
 #else
-    outColor = applyFogAndShadowFromBrightness(texColor, fogAmount, drtCombineSunDarkening(b, nb), worldPos.xyz);
+    outColor = applyFogAndShadowFromBrightness(texColor, fogAmount,
+        drtCombineSunDarkening(b, faceBrightness), worldPos.xyz);
 #endif
 
     float glow = 0;

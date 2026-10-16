@@ -140,7 +140,7 @@ internal sealed class HeldProjectionFit : IDisposable
         // receivers via handOffset / cameraNear destroys map resolution; the
         // receiver shader blends out of shadowing at this cone's boundary.
         SlopeLimits(camera, out var sx, out var sy);
-        float px = 1f / sx, py = 1f / sy, far = range + .5f;
+        float px = 1f / sx, py = 1f / sy, far = MovingLightShadowRenderer.ShadowExtent(range);
         const float n = .005f;
         Array.Clear(result, offset, 16);
         result[offset] = px;

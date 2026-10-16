@@ -57,6 +57,9 @@ flat out int skyExposed;
 
 flat out vec2 uvBase;
 flat out int waterFlags;
+// Native liquid fragments retain this legacy interface even when the current
+// foam implementation only reads the compile-time FOAMEFFECT setting.
+flat out int renderFoam;
 
 #include vertexflagbits.ash
 #include shadowcoords.vsh
@@ -119,6 +122,11 @@ void main(void)
 	flowVectorf = flowVector;
 	
 	waterFlags = waterFlagsIn;
+#if FOAMEFFECT > 0
+	renderFoam = 1;
+#else
+	renderFoam = 0;
+#endif
 	// The geometric normal was decoded before applyLight for directional light.
 	skyExposed = (renderFlags >> LiquidSkyExposedBitPosition) & 1;
 	

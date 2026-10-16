@@ -10,10 +10,12 @@ internal sealed partial class PlacedLightSurfaceCache : IDisposable
 {
     // Each four-way page owns an exact native plane and finite quad bounds.
     // An 80-byte header precedes two complete 17x17 banks of 32-byte nodes.
-    // 16K pages cost ~290 MiB including the previous complete lighting field.
+    // 32K pages cost ~580 MiB including the previous complete lighting field.
+    // The extra ~290 MiB retains opposite views without increasing lookup taps
+    // or per-frame page work. Smaller driver/allocation limits still fall back.
     internal const int Capacity = 1 << 12, RecordBytes = 18576, HeaderBytes = 16, FillLimit = 4;
     internal const int BufferBytes = HeaderBytes + Capacity * RecordBytes;
-    internal const int TargetEntryCapacity = 1 << 14;
+    internal const int TargetEntryCapacity = 1 << 15;
     internal const int SourcePrefixBytes = 1024 * 64, RegionCount = 1 << 16;
     internal const int SourceBufferBytes = SourcePrefixBytes + RegionCount * sizeof(uint) * 2, TransitionFrames = 12;
     private const uint GenerationMask = 0x3fffffffu;
@@ -177,7 +179,8 @@ internal sealed partial class PlacedLightSurfaceCache : IDisposable
                 UploadRegions();
                 // View-driven membership stamps preserve truthful footprints,
                 // but only semantic source/depth edits need a full-screen burst.
-                if ((visibleRefresh || _visibleRefreshPending) && ++VisibleRefreshRevision == 0) VisibleRefreshRevision = 1;
+                if ((visibleRefresh || _visibleRefreshPending) && ++VisibleRefreshRevision == 0)
+                    VisibleRefreshRevision = 1;
                 _visibleRefreshPending = false;
                 _maps = maps;
                 _depthGeneration = maps.DepthGeneration;
@@ -249,7 +252,7 @@ internal sealed partial class PlacedLightSurfaceCache : IDisposable
                     out int allocated);
                 if (allocated == BufferSizeBytes) break;
                 // The driver limit is not a promise of free VRAM. Retry only
-                // the two smaller fixed tables, before any lighting is published.
+                // the smaller fixed tables, before any lighting is published.
                 GL.DeleteBuffer(Buffer);
                 Buffer = 0;
             }

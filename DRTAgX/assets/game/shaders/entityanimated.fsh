@@ -1,5 +1,11 @@
 #version 330 core
 #extension GL_ARB_explicit_attrib_location: enable
+#extension GL_ARB_shader_storage_buffer_object: require
+#extension GL_ARB_shading_language_420pack: require
+#extension GL_ARB_shader_image_load_store: require
+
+// GLSL 330 needs the storage qualifier extension explicitly for readonly SSBOs;
+// strict compilers do not infer it from shader_storage_buffer_object alone.
 
 // SheyderMod: vendored engine entityanimated.fsh (animated entity pass) with a mod hook: the
 // Specular highlight (inlined here, not #included, because FpHands recompiles this shader before
@@ -21,6 +27,7 @@ in float fragFrostAlpha;
 in float voxSunLight;
 in vec3 drtAnimatedInheritedEmission;
 in float drtAnimatedInheritedGlow;
+in vec3 drtAnimatedMaterialTint;
 
 // Our include system is dumb and does not do conditional includes
 // So we add a OIT preprocceor test to oit.fsh as well
@@ -42,6 +49,8 @@ uniform float alphaTest = 0.001;
 uniform float glitchEffectStrength;
 uniform int entityId;
 uniform int glitchFlicker;
+uniform int drtAnimatedBlockDraw = 0;
+uniform mat4 projectionMatrix;
 #if defined(ALLOWDEPTHOFFSET)
 #if ALLOWDEPTHOFFSET > 0
 uniform float depthOffset;
@@ -50,6 +59,10 @@ uniform float depthOffset;
 
 #include vertexflagbits.ash
 #define DRT_SURFACE_FOG_AFTER_LIGHTING
+// World creatures and furniture share this program with GUI model previews.
+// Follow terrain overexposure only for perspective draws in an active world.
+#define DRT_OVEREXPOSURE_WORLD_DRAW (drtFogColor.w > 0.5 && abs(projectionMatrix[3][3]) < 0.5)
+#define DRT_OVEREXPOSURE_TRANSFORMED_NORMAL
 #include fogandlight.fsh
 #include noise3d.ash
 #include noise2d.ash
@@ -114,7 +127,17 @@ void sm_applySpecular(inout vec3 color, vec2 sampleUv, vec3 albedo, vec3 N, vec3
 }
 // SheyderMod end
 
+// DRT_MODEL_RECEIVER_INSERT
 void main() {
+#ifdef DRT_EXPLICIT_SURFACE_LIGHTING
+    // This draw-uniform branch keeps derivatives coherent and skips the extra
+    // receiver-plane work for creatures. Evaluate before alpha/damage discard;
+    // skinning has already transformed both position and normal.
+    vec3 drtAnimatedReceiverNormal = normal;
+    if (drtAnimatedBlockDraw != 0)
+        drtAnimatedReceiverNormal = drtSunPrimitiveNormal(
+            worldPos.xyz - drtAtmosphereCamera.xyz, normal);
+#endif
     float b = 1;
     
     if (damageEffect > 0) {
@@ -164,6 +187,28 @@ else {
         outColor = applyFogAndShadowWithNormal(texColor, fogAmount, normal, 1, intensity, worldPos.xyz);
     }
 
+#endif
+
+#if defined(DRT_EXPLICIT_SURFACE_LIGHTING) && defined(DRT_PLACED_RECEIVER_FALLBACK)
+    // Opening a block must not swap terrain's inverse-square PLS for a
+    // distance-dependent voxel dimmer. Borrow completed depth without creating
+    // page jobs or changing static-cache revisions as joints animate.
+    if (drtAnimatedBlockDraw != 0 && outColor.a >= alphaTest) {
+        float sky = pow(clamp(sm_voxSunLight, 0.0, 1.0), 1.6) *
+            clamp(dot(drtSkyLight, DRT_LUMINANCE), 0.0, 1.0);
+        float weight = (1.0 - smoothstep(112.0, 128.0, length(camPos.xyz))) *
+            (1.0 - smoothstep(0.2, 0.9, sky)) * (1.0 - clamp(glowLevel * 4.0, 0.0, 1.0));
+        vec3 material = drtAnimatedEmissionMaterial * drtAnimatedMaterialTint;
+        vec4 placed, self;
+        if (weight > 0.0 && drtReadReceiverPlacedLight(
+            worldPos.xyz - drtAtmosphereCamera.xyz, drtAnimatedReceiverNormal, placed, self)) {
+            outColor.rgb += material * drtReceiverPlacedVoxelDelta(drtVoxelLight, placed, self, weight);
+        }
+        // Match terrain: apply the visor minimum after the final local light,
+        // also with PLS off or no ready sources. Emission remains independent.
+        vec3 emission = material * drtEmissionLight;
+        outColor.rgb = emission + max(outColor.rgb - emission, material * drtMinimumSurfaceLight());
+    }
 #endif
 
     float materialGlow = glowLevel;

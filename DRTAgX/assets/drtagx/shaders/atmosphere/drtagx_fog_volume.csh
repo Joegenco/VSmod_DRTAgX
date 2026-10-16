@@ -19,12 +19,12 @@ void main() {
     for (int z = 0; z < size.z; ++z) {
         float distance = exp((float(z) + 0.5) / float(size.z) * log(1.0 + drtAtmosphereFlags.z)) - 1.0;
         vec3 start = direction * previousDistance, end = direction * distance;
-        vec2 outdoor = drtFogOutdoorInterval(start, end);
-        float deltaTau = drtWeatherSegmentOpticalDepth(
-            mix(start, end, outdoor.x), mix(start, end, outdoor.y), false);
+        float deltaTau = drtRoomWeatherOpticalDepth(start, end, false, 1.0);
         float segmentWeight = exp(-opticalDepth) * (1.0 - exp(-deltaTau));
         opticalDepth += deltaTau;
-        vec3 mid = mix(start, end, 0.5 * (outdoor.x + outdoor.y));
+        // Keep the sample stationary while shelter fades; only its air density
+        // changes, so crossing a half-weight cannot jump to another shadow texel.
+        vec3 mid = 0.5 * (start + end);
         vec3 coords = (toShadow * vec4(mid, 0.0)).xyz + cameraInShadow;
         float visibility = 1.0;
         if (all(greaterThanEqual(coords, vec3(0.0))) && all(lessThanEqual(coords, vec3(1.0))))

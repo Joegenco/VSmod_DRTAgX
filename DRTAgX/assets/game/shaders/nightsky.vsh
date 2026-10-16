@@ -9,6 +9,8 @@ uniform mat4 viewMatrix;
 
 out vec3 texCoords;
 out vec3 drtStarDirection;
+// Keep the native fragment interface complete even when its height is unused.
+out float worldPosY;
 out float nightVisionStrengthv;
 
 #include vertexflagbits.ash
@@ -18,6 +20,7 @@ out float nightVisionStrengthv;
 void main () {
   texCoords = vertexPosition;
   vec4 worldPos = modelMatrix * vec4(vertexPosition, 1.0);
+  worldPosY = worldPos.y;
   drtStarDirection = normalize(worldPos.xyz);
   nightVisionStrengthv = nightVisionStrength * 0.33;
   

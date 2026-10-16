@@ -1,9 +1,13 @@
 #version 330 core
 
 uniform sampler2D inputTexture;
+// Native blur supplies frameSize as a vertex uniform, not a varying. Keep its
+// CPU-facing key/type shared here instead of restoring an unmatched input.
+uniform vec2 frameSize;
 
 in vec2 vTexCoord;
 in vec2 vBlurStep;
+in vec2 texCoords[21]; // Native compatibility taps; the current blur uses steps.
 
 out vec4 outColor;
 

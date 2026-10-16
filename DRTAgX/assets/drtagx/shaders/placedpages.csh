@@ -80,7 +80,7 @@ void main() {
     if(all(equal(support,uvec2(0xffffffffu))))return;
     uvec4 key=drtPageKey(p,token,plane);uint hash=drtPageHash(key,support);
     int first=int(hash&uint(drtMemoCapacityMask))*4,slot=-1,victim=-1;
-    uint oldest=0u,expected=0u;bool busyUnknown=false;
+    uint oldest=0u,expected=0u;int victimRank=-1;bool busyUnknown=false;
     for(int bucket=0;bucket<2;++bucket) {
         if(bucket==1)first=drtPageSecondaryBucket(hash)*4;
         for(int way=0;way<4;++way) {
@@ -89,7 +89,15 @@ void main() {
             if(ours&&all(equal(drtMemoPages[index].key,key))&&all(equal(drtMemoPages[index].support.xy,support))) {slot=index;expected=s.x;break;}
             if(ours&&(s.x&DRT_PAGE_BUSY)!=0u) {busyUnknown=true;continue;}
             uint age=ours?drtMemoAge(s.y):0x3fffffffu;
-            if(victim<0||age>oldest) {victim=index;oldest=age;expected=s.x;}
+            // Age is only a collision guard, never a page lifetime. Prefer an
+            // unused epoch, then cold unfilled/negative entries, before losing
+            // complete lighting from a view the player may turn back toward.
+            // Ineligible young entries cannot hide an eligible complete victim.
+            if(ours&&age<120u)continue;
+            int rank=!ours?2:((s.z==0u||s.z==3u)?1:0);
+            if(victim<0||rank>victimRank||(rank==victimRank&&age>oldest)) {
+                victim=index;victimRank=rank;oldest=age;expected=s.x;
+            }
         }
         // Search both identities before choosing a victim: a previously stored
         // secondary page must never be duplicated into an available primary slot.

@@ -10,17 +10,21 @@ using Vintagestory.API.MathTools;
 
 namespace DRTAgX;
 
-/// <summary>Use covered VS Roofing cells as solid barriers in Sheyder's light bake only.</summary>
+/// <summary>Use all VS Roofing cells as solid barriers in Sheyder's light bake only.</summary>
 internal sealed class SheyderRoofLightCompatibility : IDisposable
 {
     private const string PatchId = "drtagx.sheyder.roof-light";
     private readonly Harmony _harmony = new(PatchId);
+
     private static readonly MethodInfo NativeAbsorption = AccessTools.Method(typeof(IWorldChunk),
         nameof(IWorldChunk.GetLightAbsorptionAt), new[] { typeof(int), typeof(BlockPos), typeof(IList<Block>) });
+
     private static Type? _roofType;
     private static FieldInfo? _profileShapes;
-    private static object? _partialShape, _fullShape;
+    private static object? _fullShape;
+
     private static ConditionalWeakTable<IList<Block>, byte[]> _profiles = new();
+
     // Mirror Sheyder's registry lifetime: one immutable classification per block
     // list, with a worker-local last-list cache to avoid dictionary work per ray.
     [ThreadStatic] private static IList<Block>? _lastBlocks;
@@ -38,7 +42,6 @@ internal sealed class SheyderRoofLightCompatibility : IDisposable
             Type? shape = _profileShapes?.FieldType.GetElementType();
             if (build.ReturnType != profiles || shape is not { IsEnum: true })
                 throw new MissingMemberException("Sheyder BlockProfiles.Shapes enum array");
-            _partialShape = Enum.Parse(shape, "Partial");
             _fullShape = Enum.Parse(shape, "FullCube");
             var occlusion = assembly.GetType("SheyderMod.Features.BlockLight.Rays.Occlusion", true)!;
             foreach (string name in new[] { "BlocksRay", "AbsorptionEighths" })
@@ -48,9 +51,11 @@ internal sealed class SheyderRoofLightCompatibility : IDisposable
                 _harmony.Patch(method,
                     transpiler: new HarmonyMethod(typeof(SheyderRoofLightCompatibility), nameof(UseRoofAbsorption)));
             }
+
             _harmony.Patch(build,
                 postfix: new HarmonyMethod(typeof(SheyderRoofLightCompatibility), nameof(AfterProfiles)));
-            api.Logger.Notification("[DRT AgX] Sheyder block/sun light treats covered VS Roofing cells as solid; bare frames stay open.");
+            api.Logger.Notification(
+                "[DRT AgX] Sheyder block/sun light treats all VS Roofing cells, including bare frames, as solid.");
         }
         catch (Exception e)
         {
@@ -71,10 +76,12 @@ internal sealed class SheyderRoofLightCompatibility : IDisposable
             {
                 Block? block = blocks[i];
                 if (block?.Code?.Domain != "vsroofing" || _roofType?.IsInstanceOfType(block) != true) continue;
-                profile[i] = block.Variant["type"] switch { "bare" => 1, "filled" => 2, _ => 0 };
+                profile[i] = 1;
             }
+
             _profiles.AddOrUpdate(blocks, profile);
         }
+
         _lastBlocks = blocks;
         return _lastProfile = profile;
     }
@@ -83,10 +90,11 @@ internal sealed class SheyderRoofLightCompatibility : IDisposable
     {
         if (_profileShapes?.GetValue(__result) is not Array shapes) return;
         byte[] roofs = RoofProfiles(__0);
-        // Installed roof.json defines bare/filled for every orientation. Covered
-        // cells close the whole voxel; bare frames retain their partial geometry.
+        // Every block from the roofing class closes the whole voxel for the bake,
+        // including bare frames and future variants. Rendered meshes stay native.
         for (int i = 0, count = Math.Min(roofs.Length, shapes.Length); i < count; ++i)
-            if (roofs[i] != 0) shapes.SetValue(roofs[i] == 2 ? _fullShape : _partialShape, i);
+            if (roofs[i] != 0)
+                shapes.SetValue(_fullShape, i);
     }
 
     private static IEnumerable<CodeInstruction> UseRoofAbsorption(IEnumerable<CodeInstruction> instructions)
@@ -105,8 +113,10 @@ internal sealed class SheyderRoofLightCompatibility : IDisposable
                 instruction.operand = replacement;
                 ++replacements;
             }
+
             result.Add(instruction);
         }
+
         if (replacements != 1)
             throw new InvalidOperationException("Sheyder occlusion absorption contract changed.");
         return result;
@@ -116,9 +126,9 @@ internal sealed class SheyderRoofLightCompatibility : IDisposable
     {
         byte[] roofs = RoofProfiles(blocks);
         int id = chunk.Data[index];
-        // 99 is roof-filled's authored opaque absorption, including roof materials
-        // that normally override it. Both sun and block-light rays use this lookup.
-        if ((uint)id < (uint)roofs.Length && roofs[id] == 2) return 99;
+        // Use the covered roof's authored opaque absorption for every roof cell,
+        // including frames. Both sun and block-light rays use this scoped lookup.
+        if ((uint)id < (uint)roofs.Length && roofs[id] != 0) return 99;
         return chunk.GetLightAbsorptionAt(index, position, blocks);
     }
 
@@ -127,7 +137,7 @@ internal sealed class SheyderRoofLightCompatibility : IDisposable
         _harmony.UnpatchAll(PatchId);
         _roofType = null;
         _profileShapes = null;
-        _partialShape = _fullShape = null;
+        _fullShape = null;
         _profiles = new();
         _lastBlocks = null;
         _lastProfile = null;

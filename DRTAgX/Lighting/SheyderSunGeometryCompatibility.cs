@@ -70,7 +70,7 @@ internal sealed class SheyderSunGeometryCompatibility : IDisposable
             Block? block = blocks[i];
             if (block == null || block.Id == 0) continue;
             // Roofs deliberately use Sheyder's directional bake: restoring native
-            // sunlight here would undo the filled-roof light barrier below them.
+            // sunlight here would undo the roof light barrier below them.
             if (_microBlock?.IsInstanceOfType(block) == true && _roofBlock?.IsInstanceOfType(block) != true)
                 buffer.PreserveNeighborhood(i);
         }

@@ -14,6 +14,7 @@ internal sealed class AtmosphereRoomShelter
     internal const int MaxNativeCells = 29 * 29 * 29;
     private const int MaskOffset = FrameOffset + 8;
     private const int RefreshMilliseconds = 250;
+    private const int FadeMilliseconds = 2000;
     private readonly ICoreClientAPI _api;
     private readonly BlockPos _lastCameraBlock = new(0), _roofPosition = new(0);
     private readonly AtmosphereRoomFallback _fallback = new();
@@ -23,13 +24,13 @@ internal sealed class AtmosphereRoomShelter
     private RoomRegistry? _registry;
     private Room? _packedRoom;
     private float[]? _publishedFrame;
-    private long _nextRefresh;
+    private long _nextRefresh, _shelterEnteredAt, _lastCaptureAt;
     private bool _snapshot, _active, _rectangular, _packedRectangular, _maskDirty;
 
     internal AtmosphereRoomShelter(ICoreClientAPI api) => _api = api;
 
     // Main/render thread only: native RoomRegistry shares its flood-fill scratch.
-    // Only the two bounds change each frame; topology and packed bits are cached.
+    // Only bounds and fade strength change each frame; topology and bits stay cached.
     internal void Capture(BlockPos cameraBlock, Vec3d camera, float[] frame)
     {
         var world = _api.World;
@@ -40,10 +41,14 @@ internal sealed class AtmosphereRoomShelter
             _registry = _api.ModLoader.GetModSystem<RoomRegistry>();
             _packedRoom = null;
             _snapshot = false;
+            _active = false;
         }
 
         long now = world.ElapsedMilliseconds;
-        if (!_snapshot || _lastCameraBlock.dimension != cameraBlock.dimension ||
+        var clockReset = now < _lastCaptureAt;
+        _lastCaptureAt = now;
+        var wasActive = _active && _lastCameraBlock.dimension == cameraBlock.dimension;
+        if (!_snapshot || clockReset || _lastCameraBlock.dimension != cameraBlock.dimension ||
             !_lastCameraBlock.Equals(cameraBlock) || now >= _nextRefresh)
         {
             _lastCameraBlock.Set(cameraBlock);
@@ -53,7 +58,11 @@ internal sealed class AtmosphereRoomShelter
             Refresh(cameraBlock);
         }
 
-        frame[FrameOffset + 3] = _active ? 1f : 0f;
+        // Fade only on entering shelter, not on each room-cache refresh or step
+        // inside it. World/dimension changes and a reset clock start a new fade.
+        if (_active && (!wasActive || clockReset)) _shelterEnteredAt = now;
+        var fade = _active ? Math.Clamp((now - _shelterEnteredAt) / (float)FadeMilliseconds, 0f, 1f) : 0f;
+        frame[FrameOffset + 3] = fade * fade * (3f - 2f * fade);
         frame[FrameOffset + 7] = _rectangular ? 1f : 0f;
         if (!_active) return;
 

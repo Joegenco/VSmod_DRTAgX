@@ -76,10 +76,13 @@ internal static class PlacedLightPolicy
                 next.Priority == incomingPriority && !EqualTierEligible(next, incomingDistance, since, now)) continue;
             if (chosen < 0 || next.Priority > residents[chosen].Priority ||
                 next.Priority == residents[chosen].Priority &&
-                (next.CompletedAt < residents[chosen].CompletedAt ||
-                 next.CompletedAt == residents[chosen].CompletedAt &&
-                 (next.LastHit < residents[chosen].LastHit || next.LastHit == residents[chosen].LastHit &&
-                     Coordinates(next, residents[chosen]) < 0))) chosen = i;
+                // Actual reuse outranks bake age: a long-lived lamp just seen
+                // behind the camera must survive ahead of a newer cold lamp.
+                (next.LastHit < residents[chosen].LastHit ||
+                 next.LastHit == residents[chosen].LastHit &&
+                 (next.CompletedAt < residents[chosen].CompletedAt ||
+                  next.CompletedAt == residents[chosen].CompletedAt &&
+                  Coordinates(next, residents[chosen]) < 0))) chosen = i;
         }
 
         return chosen;

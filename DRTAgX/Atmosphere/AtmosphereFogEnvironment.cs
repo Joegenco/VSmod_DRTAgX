@@ -9,7 +9,7 @@ namespace DRTAgX;
 internal sealed class AtmosphereFogEnvironment
 {
     internal const int FrameOffset = 116; // Append one std140 vec4; all earlier offsets stay intact.
-    internal const int FullSunlightLevel = 1; // Preserve the cave rule; room enclosure independently suppresses indoor fog.
+    internal const int FullSunlightLevel = 12; // Smoothly fade weather fog from full at level 12 to none at level 0.
     private readonly BlockPos _cameraBlock = new(0);
     private readonly AtmosphereRoomShelter _shelter;
 
@@ -20,7 +20,8 @@ internal sealed class AtmosphereFogEnvironment
         var world = api.World;
         float[] sunlight = world.SunLightLevels;
         int brightness = world.SunBrightness;
-        float full = Math.Max(0.000001f, NormalizeSunlight(sunlight, brightness, Math.Min(FullSunlightLevel, brightness)));
+        float full = Math.Max(0.000001f,
+            NormalizeSunlight(sunlight, brightness, Math.Min(FullSunlightLevel, brightness)));
         _cameraBlock.X = (int)Math.Floor(camera.X);
         _cameraBlock.Z = (int)Math.Floor(camera.Z);
         // Full-world camera Y is dimension-encoded. The public InternalY setter

@@ -90,12 +90,6 @@ vec4 applyLightWithNormal(vec3 ambientColor, vec4 lightColor, int renderFlags, v
     drtSkyLight = drtAmbientSky(ambientColor);
     vec3 voxel = lightColor.rgb / max(1.0, glitchStrengthFL * 2.0);
     vec3 sun = drtSunRadiance(sm_voxSunLight, drtSkyLight);
-#ifdef DRT_NATIVE_DIFFUSE_GAIN
-    // Only the native animated-block scope supplies a non-unit gain. Preserve
-    // sunlight access for fog/shadows and leave authored emission independent.
-    voxel *= DRT_NATIVE_DIFFUSE_GAIN;
-    sun *= DRT_NATIVE_DIFFUSE_GAIN;
-#endif
     applyLightWithoutPointLight(vec4(sun, 1.0),
         vec4(voxel, 1.0), bGlow);
 #ifdef DRT_FORWARD_PLACED_LIGHTS
@@ -112,8 +106,13 @@ vec4 applyLightWithNormal(vec3 ambientColor, vec4 lightColor, int renderFlags, v
     // Keep it local so directional shadows cannot extinguish it; AgX's input
     // owns the green infrared-style conversion and the native effect fade.
 #ifndef DRT_FRAGMENT_NIGHTVISION_FLOOR
-    float nightFloor = drtNightVisionIllumination(drtVertexNightVisionStrength, worldPos.xyz);
-    drtLocalLight = drtEmissionLight + max(drtLocalLight - drtEmissionLight, vec3(nightFloor));
+#ifdef DRT_VERTEX_NIGHTVISION_GUARD
+    if (DRT_VERTEX_NIGHTVISION_GUARD)
+#endif
+    {
+        float nightFloor = drtNightVisionIllumination(drtVertexNightVisionStrength, worldPos.xyz);
+        drtLocalLight = drtEmissionLight + max(drtLocalLight - drtEmissionLight, vec3(nightFloor));
+    }
 #endif
     blockLight = drtSunLight + drtLocalLight;
     return vec4(blockLight, 1.0);

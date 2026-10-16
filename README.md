@@ -1,4 +1,4 @@
-# DRTAgX 2.1.1
+# DRTAgX 2.1.3
 
 Client-side graphics mod for **Vintage Story 1.22.7**, by **Joegen**.
 It builds on the game's rendering and SheyderMod rather than replacing the engine.

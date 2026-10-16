@@ -7,7 +7,7 @@ namespace DRTAgX;
 
 /// <summary>Point-only primitive gate over the actual expanded native caster
 /// shaders. Native sun shadows retain their original vertex/fragment program.</summary>
-internal sealed class PointTerrainShadowProgram(string name) : IDisposable
+internal sealed class PointTerrainShadowProgram(string name, bool moving = false) : IDisposable
 {
     private IShaderProgram? _program;
     private int _nativeId;
@@ -39,11 +39,14 @@ internal sealed class PointTerrainShadowProgram(string name) : IDisposable
             try
             {
                 var program = api.Shader.NewShaderProgram();
-                program.VertexShader = Copy(api, native.VertexShader, EnumShaderType.VertexShader, true);
-                program.FragmentShader = Copy(api, native.FragmentShader, EnumShaderType.FragmentShader, false);
+                program.VertexShader = Copy(api, native.VertexShader, EnumShaderType.VertexShader, true, moving);
+                program.FragmentShader = Copy(api, native.FragmentShader, EnumShaderType.FragmentShader, false, moving);
                 program.GeometryShader = api.Shader.NewShader(EnumShaderType.GeometryShader);
                 program.GeometryShader.Code =
                     PointVersion(api.Assets.Get(new AssetLocation("drtagx", "shaders/point_shadowmap.gsh")).ToText());
+                // A moving-only radial limit must not alter cached placed maps
+                // or the native sun program copied above.
+                program.GeometryShader.PrefixCode = moving ? "\n#define DRT_MOVING_SHADOWS 1\n" : string.Empty;
                 api.Shader.RegisterMemoryShaderProgram(name, program);
                 if (!program.Compile())
                 {
@@ -89,7 +92,7 @@ internal sealed class PointTerrainShadowProgram(string name) : IDisposable
         return _program;
     }
 
-    private static IShader Copy(ICoreClientAPI api, IShader source, EnumShaderType type, bool pointVertex)
+    private static IShader Copy(ICoreClientAPI api, IShader source, EnumShaderType type, bool pointVertex, bool moving)
     {
         var shader = api.Shader.NewShader(type);
         // Native file loading promotes USESSBO terrain from330 to430. Memory
@@ -98,7 +101,8 @@ internal sealed class PointTerrainShadowProgram(string name) : IDisposable
         // version directive. Extensions and native prefix remain untouched.
         shader.Code = PointVersion(source.Code);
         shader.PrefixCode =
-            (source.PrefixCode ?? string.Empty) + (pointVertex ? "\n#define DRT_POINT_SHADOWS 1\n" : "");
+            (source.PrefixCode ?? string.Empty) + (pointVertex ? "\n#define DRT_POINT_SHADOWS 1\n" : "") +
+            (moving ? "\n#define DRT_MOVING_SHADOWS 1\n" : "");
         return shader;
     }
 

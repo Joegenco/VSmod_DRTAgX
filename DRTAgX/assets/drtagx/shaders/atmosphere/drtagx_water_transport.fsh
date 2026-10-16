@@ -83,12 +83,15 @@ DrtFogTransport drtSurfaceMediumTransport(vec3 worldPos, float receiverDepth, bo
             fog = drtComposeTransport(drtAirTransport(vec3(0.0), interfacePos, true, exposure),
                 drtWaterTransport(distance - interfaceDistance, murk, false));
         }
-        if (boundary && exposure > 0.0 && distance > 0.0001 && drtFogOutdoorInterval(vec3(0.0), p).x < 1.0) {
+        if (boundary && distance > 0.0001) {
             // Shelter masks atmospheric concealment, never water absorption.
-            float t = mix(1.0, drtBoundaryTransmittance(length(p.xz)), exposure);
-            vec3 background = submerged ? murk : drtSkyBackground(normalize(p));
-            fog.transmittance *= t;
-            fog.scatter = fog.scatter * t + background * (1.0 - t);
+            float boundaryT = drtBoundaryTransmittance(length(p.xz));
+            if (boundaryT < 1.0) {
+                float t = mix(1.0, boundaryT, drtRoomBoundaryExposure(p, exposure));
+                vec3 background = submerged ? murk : drtSkyBackground(normalize(p));
+                fog.transmittance *= t;
+                fog.scatter = fog.scatter * t + background * (1.0 - t);
+            }
         }
     }
     return fog;

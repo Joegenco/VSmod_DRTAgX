@@ -87,19 +87,14 @@ void main(void)
 
     float marchDist = min(dist, vf_MaxRange);
 
-    // Reuse the room exit once per ray, then place the existing fixed sample
-    // count only in outdoor air. Sunlit windows cannot fill the entire room
-    // with shafts, and no additional shadow-map lookups are introduced.
-    vec2 outdoor = drtFogOutdoorInterval(vec3(0.0), rayDir * marchDist);
-    float outdoorStart = marchDist * outdoor.x;
-    float outdoorLength = marchDist * (outdoor.y - outdoor.x);
-    // Room membership supplies stronger shelter evidence than sunlight.
-    // Beyond a verified window keep outdoor shafts; otherwise retain the
-    // sunlight fallback that prevents exposed shadow-map gaps lighting caves.
-    float shelter = drtRoomMin.w > 0.5 ? 1.0
-        : (drtFogEnvironment.w > 0.5 ? clamp(drtFogEnvironment.y, 0.0, 1.0) : 1.0);
+    // Room shelter clears ordinary mist, not sunlight shafts. Reuse its smooth
+    // entry weight only for the indoor brightness boost; shadow maps still
+    // decide where direct sunlight can reach the full, stationary sample grid.
+    float roomWeight = clamp(drtRoomMin.w, 0.0, 1.0);
 
-    if (outdoorLength <= vf_FogStart || shelter <= 0.0) { outScatter = vec4(0.0, 0.0, 0.0, 1.0); return; }
+    if (marchDist <= vf_FogStart) {
+        outScatter = vec4(0.0, 0.0, 0.0, 1.0); return;
+    }
 
     int steps = vf_StepCount;
 
@@ -108,8 +103,8 @@ void main(void)
     float dither = bayer4(gl_FragCoord.xy);
 
     vec3 shadowDir = mat3(vf_ToShadowSpaceFar) * rayDir;
-    vec3 dStep     = (outdoorLength * vf_InvSteps) * shadowDir;
-    vec3 p         = vf_ShadowRayStart + outdoorStart * shadowDir + dStep * dither;
+    vec3 dStep     = (marchDist * vf_InvSteps) * shadowDir;
+    vec3 p         = vf_ShadowRayStart + dStep * dither;
 
     // Air samples do not need the surface shader's large acne offset. Bound
     // displacement toward the sun to 2 cm, independent of cascade depth span,
@@ -122,13 +117,10 @@ void main(void)
     for (int i = 0; i < steps; i++) {
 
         bool inside = all(lessThanEqual(abs(p - vec3(0.5)), vec3(0.5)));
-        litAccum += texture(shadowMapFar, p) * float(inside);
+        float visible = texture(shadowMapFar, p) * float(inside);
+        litAccum += visible;
         p += dStep;
     }
-
-    float startFade = smoothstep(vf_FogStart, vf_FogEnd, outdoorLength);
-
-    float normalOut = litAccum * vf_InvSteps;
 
     vec3 useColor = drtVolumetricSunRadiance(rayDir);
 
@@ -139,14 +131,13 @@ void main(void)
     float distNorm = min(dist, vf_RenderRange) * vf_InvRenderRange;
     float distGain = 1.0 + (vf_DistantDensity - 1.0) * distNorm;
 
-    float scatter = min(0.9, sqrt(phase * normalOut)) * startFade * vf_Intensity * distGain;
-
-    // The analytical weather already supplies mist radiance. Only the clear
-    // fraction can show additional directional shafts; additive unattenuated
-    // sky radiance otherwise makes dense fog brighter than its own background.
-    float weatherT = drtWeatherTransmittance(rayDir * outdoorStart,
-        rayDir * (outdoorStart + outdoorLength), true);
-    scatter *= (outdoorLength / max(marchDist, 0.0001)) * weatherT * shelter;
+    // Outdoor weather still attenuates additive shafts to prevent a bright
+    // whiteout. Cleared indoor air does not. Native CPU cave rejection remains;
+    // submitted shafts do not also inherit the camera's 0..12 fog-exposure fade.
+    float weatherT = drtRoomWeatherTransmittance(vec3(0.0), rayDir * marchDist, true, 1.0);
+    float scatter = min(0.9, sqrt(phase * litAccum * vf_InvSteps)) *
+        smoothstep(vf_FogStart, vf_FogEnd, marchDist) * weatherT *
+        vf_Intensity * distGain * (1.0 + roomWeight);
 
     outScatter = vec4(useColor * scatter, 1.0);
 }

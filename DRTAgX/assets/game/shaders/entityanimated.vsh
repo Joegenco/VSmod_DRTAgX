@@ -23,6 +23,9 @@ uniform mat4 projectionMatrix;
 uniform mat4 viewMatrix;
 uniform mat4 modelMatrix;
 uniform int extraGlow;
+// Scoped only around native animated block draws; creatures and hands keep
+// their inexpensive voxel-light brightness with placed-light directionality.
+uniform int drtAnimatedBlockDraw = 0;
 
 // No longer needed but kept to not break mods that still assign these values
 uniform int skipRenderJointId;
@@ -50,6 +53,9 @@ out vec4 glPos;
 // prefix does not carry that option. Keep draw-wide glow separate from faces.
 out vec3 drtAnimatedInheritedEmission;
 out float drtAnimatedInheritedGlow;
+// Preserve unlit material tint so the fragment receiver can add PLS even when
+// a native voxel-light channel is zero, without touching coverage alpha.
+out vec3 drtAnimatedMaterialTint;
 
 out vec3 normal;
 #if SSAOLEVEL > 0
@@ -60,16 +66,18 @@ out vec4 gnormal;
 
 #include vertexflagbits.ash
 #include shadowcoords.vsh
-// Animated entities retain cheap unshadowed vertex lighting. They never sample
-// placed-light depth in their fragment stage, including the native OIT variant.
+// Creatures retain cheap unshadowed vertex lighting. Animated placed blocks
+// instead use the same completed source/depth snapshot as other block models.
 #define DRT_FORWARD_PLACED_LIGHTS 1
 // Keep native blocklight brightness/color; placed sources only shape its direction.
 #define DRT_ANIMATED_PLACED_FACING 1
-// Native animated blocks sample one voxel for the whole model. Their renderer
-// scopes this diffuse calibration; mobs/hands and unlit previews default to 1.
-// Apply it before the separate emission/moving-light/night-vision additions.
-uniform float drtAnimatedBlockLightGain = 1.0;
-#define DRT_NATIVE_DIFFUSE_GAIN drtAnimatedBlockLightGain
+#define DRT_FORWARD_PLACED_GUARD (drtAnimatedBlockDraw == 0)
+// Block PLS replaces voxel light in the fragment; enforce its visor minimum
+// there too so source radiance is not added on top of an already raised floor.
+#define DRT_VERTEX_NIGHTVISION_GUARD (drtAnimatedBlockDraw == 0)
+// Opening a placed block switches from terrain to this shared model shader.
+// Keep the same sun/voxel gains: a renderer-wide dimmer creates a brightness
+// pop even on unchanged faces. Directional shading stays in the shared helpers.
 // Open doors/chests share this shader with creatures. Keep the ordinary local
 // light response so switching from a terrain mesh does not double facing light.
 #define DRT_DYNAMIC_NORMAL_VIEW (viewMatrix * vec4(normal, 0.0)).xyz
@@ -110,6 +118,7 @@ void main(void)
 	vec4 cameraPos = camPos = viewMatrix * worldPos;
 
 	uv = uvIn;
+	drtAnimatedMaterialTint = renderColor.rgb * colorIn.rgb;
 	int lightingFlags = extraGlow + flags;
 	drtAnimatedInheritedEmission = vec3(0.0);
 	drtAnimatedInheritedGlow = 0.0;

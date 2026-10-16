@@ -71,13 +71,16 @@ vec3 drtWeatherRadiance(vec3 direction) {
     vec3 weather = max(mix(max(color, vec3(0.0)), clear * (fogLuma / max(skyLuma, 0.0001)), tint), vec3(0.0));
     // Display-sky exposure is useful for ordinary haze, but up to six times
     // native radiance turns opaque valley mist into a white wall. Only dense
-    // weather loses that display boost; nighttime fog is never brightened.
+    // weather loses half that display boost, retaining a brighter mist without
+    // the original whiteout; nighttime fog is never brightened.
     // Include flat-plane penetration, minimum opacity and optional WorldFog:
     // dense haze can exist even when ordinary native fog density is near zero.
     float nearExtinction = drtWeatherOpticalDepth(vec3(0.0, 0.0, 10.0), true) * 0.1;
-    float dense = smoothstep(0.06, DRT_MAX_WEATHER_EXTINCTION, nearExtinction);
+    // Visibility uses native weather units; only the artistic display gain
+    // fades in dense fog. This never changes the haze/mist extinction itself.
+    float dense = smoothstep(0.06, 0.20, nearExtinction);
     float display = DRT_SKY_EXPOSURE * DRT_SKY_DISPLAY_GAIN;
-    return weather * mix(display, min(display, 1.0), dense);
+    return weather * mix(display, min(display, 1.0), 0.5 * dense);
 }
 
 vec3 drtSkyBackground(vec3 direction) {
@@ -89,8 +92,7 @@ vec3 drtFogScatterColor(vec3 direction) {
 }
 
 float drtCumulativeScatterWeight(vec3 p) {
-    vec2 outdoor = drtFogOutdoorInterval(vec3(0.0), p);
-    float t = drtWeatherTransmittance(p * outdoor.x, p * outdoor.y, false);
+    float t = drtRoomWeatherTransmittance(vec3(0.0), p, false, 1.0);
     return 1.0 - t;
 }
 
@@ -115,7 +117,8 @@ float drtVolumeVisibility(vec3 start, vec3 end) {
 DrtFogTransport drtExposedAirTransport(vec3 start, vec3 end, bool minimumFog, float exposure) {
     float distance = length(end - start);
     if (distance < 0.0001) return drtClearTransport();
-    float t = drtWeatherTransmittance(start, end, minimumFog, exposure);
+    float t = drtRoomWeatherTransmittance(start, end, minimumFog, exposure);
+    if (t >= 1.0) return drtClearTransport();
     vec3 color = drtFogScatterColor(end / max(length(end), 0.0001));
     // Shafts only shade directional contrast. Transmission bounds that contrast
     // so opaque ordinary/minimum/flat/WorldFog converges to the weather sky,
@@ -127,9 +130,7 @@ DrtFogTransport drtExposedAirTransport(vec3 start, vec3 end, bool minimumFog, fl
 }
 
 DrtFogTransport drtAirTransport(vec3 start, vec3 end, bool minimumFog, float exposure) {
-    vec2 outdoor = drtFogOutdoorInterval(start, end);
-    if (outdoor.x >= outdoor.y) return drtClearTransport();
-    return drtExposedAirTransport(mix(start, end, outdoor.x), mix(start, end, outdoor.y), minimumFog, exposure);
+    return drtExposedAirTransport(start, end, minimumFog, exposure);
 }
 
 DrtFogTransport drtAirTransport(vec3 start, vec3 end, bool minimumFog) {
@@ -139,13 +140,14 @@ DrtFogTransport drtAirTransport(vec3 start, vec3 end, bool minimumFog) {
 DrtFogTransport drtSurfaceAirTransport(vec3 worldPos, bool boundary, float exposure) {
     if (drtFogColor.w < 0.5) return drtClearTransport();
     vec3 p = worldPos - drtAtmosphereCamera.xyz;
-    vec2 outdoor = drtFogOutdoorInterval(vec3(0.0), p);
-    if (outdoor.x >= outdoor.y) return drtClearTransport();
-    DrtFogTransport fog = drtExposedAirTransport(p * outdoor.x, p * outdoor.y, true, exposure);
+    DrtFogTransport fog = drtExposedAirTransport(vec3(0.0), p, true, exposure);
     if (boundary && length(p) > 0.0001) {
-        float t = mix(1.0, drtBoundaryTransmittance(length(p.xz)), exposure);
-        fog.transmittance *= t;
-        fog.scatter = fog.scatter * t + drtSkyBackground(normalize(p)) * (1.0 - t);
+        float boundaryT = drtBoundaryTransmittance(length(p.xz));
+        if (boundaryT < 1.0) {
+            float t = mix(1.0, boundaryT, drtRoomBoundaryExposure(p, exposure));
+            fog.transmittance *= t;
+            fog.scatter = fog.scatter * t + drtSkyBackground(normalize(p)) * (1.0 - t);
+        }
     }
     return fog;
 }

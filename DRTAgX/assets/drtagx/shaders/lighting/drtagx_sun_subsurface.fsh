@@ -9,7 +9,11 @@
 // value- and varying-based entry points so both the forward chunk shaders and the
 // deferred relight can apply the identical backlight.
 
+// Deferred uses its G-buffer wind classification and the value-based helper;
+// its fullscreen vertex stage has no terrain wind varying.
+#ifndef DRT_DEFERRED_LIGHTING
 in float tl_isWind;
+#endif
 
 uniform float tl_Strength;
 uniform float tl_Power;
@@ -62,7 +66,9 @@ void tl_applyBacklightValue(inout vec3 color, inout float bloomMask, vec3 smooth
     }
 }
 
+#ifndef DRT_DEFERRED_LIGHTING
 void tl_applyBacklight(inout vec3 color, inout float bloomMask, vec3 smoothBase, vec3 wpos, float shadowB) {
     tl_applyBacklightValue(color, bloomMask, smoothBase, wpos, shadowB, blockBrightness, tl_isWind);
 }
+#endif
 #endif

@@ -12,7 +12,9 @@ namespace DRTAgX;
 internal sealed class AtmosphereRenderer : IRenderer
 {
     private readonly ICoreClientAPI _api;
-    internal const int FrameFloatCount = AtmosphereRoomShelter.FrameFloatCount; // Shared std140 header plus cached room occupancy.
+
+    internal const int
+        FrameFloatCount = AtmosphereRoomShelter.FrameFloatCount; // Shared std140 header plus cached room occupancy.
 
     private readonly float[] _frame = new float[FrameFloatCount],
         _inverseView = new float[16],
@@ -95,8 +97,6 @@ internal sealed class AtmosphereRenderer : IRenderer
         _frame[3] = 1f;
         _frame[4] = Nonnegative(ambient.BlendedFogDensity);
         _frame[5] = Math.Clamp(ambient.BlendedFogMin, 0f, 1f);
-        _frame[6] = ambient.BlendedFlatFogDensity;
-        _frame[7] = ambient.BlendedFlatFogYPosForShader;
         int desired = _api.Settings.Int.Get("viewDistance", 512);
         var data = _api.World.Player.WorldData;
         int approved = data.LastApprovedViewDistance;
@@ -111,6 +111,15 @@ internal sealed class AtmosphereRenderer : IRenderer
             _fogCamera.Set(_sunGridInverseView[12], _sunGridInverseView[13], _sunGridInverseView[14]);
         }
         else _fogCamera.Set(_api.World.Player.Entity.CameraPos);
+
+        // Use the published native shader state: FlatFogStartYPos is a world
+        // plane (native consumers subtract their render origin). Our transport
+        // rays start at the rendered eye, so translate by that eye exactly once.
+        // This also avoids relying on the ambient getter's ambiguous origin.
+        var shaderUniforms = _api.Render.ShaderUniforms;
+        _frame[6] = shaderUniforms.FlagFogDensity;
+        _frame[7] = (float)(shaderUniforms.FlatFogStartYPos - _fogCamera.Y);
+
         _fogEnvironment.Capture(_api, _frame, _lodFogRange.Endpoint, _fogCamera);
         _frame[9] = 200f;
         _frame[10] = _api.World is ClientMain client && client.playerProperties != null &&
@@ -185,7 +194,9 @@ internal sealed class AtmosphereRenderer : IRenderer
 
     private void CaptureAir()
     {
-        double cameraY = _api.World.Player.Entity.CameraPos.Y;
+        // Dry snapshots and submerged rebasing must use the same rendered eye
+        // as drtFogDensity.w, including eye height and third-person orbit.
+        double cameraY = _fogCamera.Y;
         if (_frame[10] < 0.7f)
         {
             // A dry snapshot prevents the native submerged density/color from
@@ -239,6 +250,9 @@ internal sealed class AtmosphereRenderer : IRenderer
             return; // GUI/item previews do not receive world fog.
         }
 
+        // Dither is a scene policy, not shader-specific state. Reassert once
+        // before world color draws instead of once per animated model shader.
+        GL.Disable(EnableCap.Dither);
         _state.Capture();
         try
         {

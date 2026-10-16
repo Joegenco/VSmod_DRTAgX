@@ -125,7 +125,6 @@ internal sealed class AtmosphereProgramBindings : IDisposable
     private void Bind(int program)
     {
         Restore(); // Native shader switches may omit Stop; never nest owned state.
-        GL.Disable(EnableCap.Dither);
         Binding? binding = Get(program);
         if (binding == null) return;
         if (binding.Quality == -2) binding.Quality = GL.GetUniformLocation(program, "drtPerformanceMode");

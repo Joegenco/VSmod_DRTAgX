@@ -17,6 +17,7 @@ layout(std140, binding = 5) uniform DrtHeldProjections {
 uniform mat4 casterMatrix;
 uniform int heldProjectionIndex;
 out vec2 uv;
+out vec3 drtMovingShadowOffset;
 
 void main() {
     vec4 position = casterMatrix * ElementTransforms.values[jointId]
@@ -27,6 +28,14 @@ void main() {
             ? drtHeldMatrices[hand] * position
             : vec4(2.0, 2.0, 2.0, 1.0);
     }
+    // Cube orientation preserves vector length. For fitted hands undo the
+    // asymmetric projection too, keeping the 32-block cutoff radial.
+    vec2 side = position.xy / 0.94;
+    if (heldProjectionIndex >= 0) {
+        mat4 p = drtHeldMatrices[heldProjectionIndex];
+        side = (position.xy + p[2].xy * position.w) / vec2(p[0][0], p[1][1]);
+    }
+    drtMovingShadowOffset = vec3(side, position.w);
     gl_Position = position;
     uv = uvIn;
 }

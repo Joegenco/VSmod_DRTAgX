@@ -50,8 +50,10 @@ out float drtVoxSunLight;
 
  #if SSAOLEVEL > 0
 out vec4 fragPosition;
-out vec4 gnormal;
  #endif
+// The fragment declares this normal for every SSAO setting; an unused output
+// can be optimized away only after its stage interface has been validated.
+out vec4 gnormal;
 
 out vec3 vertexPosition;
 out vec4 worldPos;
@@ -156,7 +158,7 @@ void main(void)
 
 #if SSAOLEVEL > 0
 	fragPosition = cameraPos;
+#endif
 	gnormal = modelViewMatrix * vec4(normal, 0);
 	gnormal.w=0;
-#endif
 }

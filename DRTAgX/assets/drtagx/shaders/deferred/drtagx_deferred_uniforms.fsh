@@ -13,7 +13,8 @@ uniform vec3 drtSunGridCameraPhase;
 uniform int drtDebugView;
 uniform int drtContactShadowsEnabled;
 uniform int drtShadowSlot[16];
-uniform sampler2DShadow drtShadowMaps;
+// Owned moving atlas uses raw D24 gathers for independent receiver-plane taps.
+uniform sampler2D drtShadowMaps;
 uniform int drtShadowKind[10]; // 0 cube, 1 right hand, 2 left hand
 uniform float drtShadowRange[10];
 uniform vec4 drtMovingAtlasInfo; // width, height, face size, tile stride with gutters

@@ -21,6 +21,14 @@ void main() {
     vec3 p = vec3(0.0, DRT_PLANET + max(cameraAltitude * 0.001, 0.001), 0.0);
     float distance = drtAtmosphereRayLength(p, d);
     vec3 radiance = vec3(0.0), t = vec3(1.0);
+    // Keep upper-atmosphere sunlight through twilight. Fade only lunar sky
+    // scattering between civil twilight (-6 degrees) and sunrise: the daytime
+    // moon remains visible, but contributes no atmospheric halo above the horizon.
+    float sunStrength = max(max(sunDirection.w, 0.0),
+        smoothstep(sin(radians(-8.0)), sin(radians(-2.0)), sunDirection.y));
+    float moonStrength = max(moonDirection.w, 0.0) * DRT_MOON_GAIN *
+        (1.0 - smoothstep(sin(radians(-6.0)), 0.0, sunDirection.y));
+    int sourceCount = moonStrength > 0.0 ? 2 : 1;
     for (int i = 0; i < 32; ++i) {
         // Quadratic steps resolve near-ground aerosols without more samples.
         float a = float(i) / 32.0, b = float(i + 1) / 32.0;
@@ -29,7 +37,7 @@ void main() {
         vec3 r, m, e;
         drtMedium(samplePos, r, m, e);
         vec3 integral = t * drtSegmentIntegral(e, stepLength);
-        for (int light = 0; light < 2; ++light) {
+        for (int light = 0; light < sourceCount; ++light) {
             vec4 source = light == 0 ? sunDirection : moonDirection;
             float cosine = dot(d, source.xyz);
             // A second, normalized aerosol lobe spreads spectrally reddened
@@ -41,13 +49,9 @@ void main() {
             vec2 msUv = vec2(dot(normalize(samplePos), source.xyz) * 0.5 + 0.5,
                 sqrt(clamp((length(samplePos) - DRT_PLANET) / 100.0, 0.0, 1.0)));
             vec3 multiple = texture(multiscatterTable, msUv).rgb * (r + m);
-            // Native strength is a ground-light gain. The upper atmosphere
-            // remains sunlit after the ground enters shadow; extinction and
-            // planet occlusion supply the sunset color and spatial fade.
-            float strength = max(source.w, 0.0);
-            if (light == 0)
-                strength = max(strength, smoothstep(sin(radians(-8.0)), sin(radians(-2.0)), source.y));
-            else strength *= DRT_MOON_GAIN; // Dim the complete lunar halo, including multiple scattering.
+            // Apply the same twilight gate to direct and multiple lunar
+            // scattering. A zero-strength moon skips both LUT samples entirely.
+            float strength = light == 0 ? sunStrength : moonStrength;
             radiance += integral * (direct + multiple) * strength;
         }
         t *= exp(-e * stepLength);

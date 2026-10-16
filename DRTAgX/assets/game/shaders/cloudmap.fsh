@@ -17,8 +17,13 @@ uniform vec3 sunPosition;
 uniform float nightVisionStrength;
 uniform float alpha;
 
-#define rgbaFog rgbaFogIn
-#include fogandlight.fsh
+// The map-building pass has only UV/NDC vertex outputs. It uses fog settings
+// and noise, not surface shading; importing that include adds unmatched inputs.
+#include drtagx_fog_uniforms.fsh
+#include noise3d.ash
+// Retain native/Sheyder fog setter keys without importing surface varyings.
+#include fogspheres.ash
+#include worldfog.fsh
 #define NoiseFromPixelPosition(a, b, c) vec4(0.0)
 #include skycolor.fsh
 #include drtagx_cloud_lighting.fsh

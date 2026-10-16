@@ -180,6 +180,17 @@ internal sealed partial class StaticLightSources : IDisposable
         _notifications.Position(edit);
     }
 
+    internal void NotifyCasterGeometryChanged(BlockPos position)
+    {
+        // An auxiliary native model has already become ready, changed or gone.
+        // There is no terrain upload to wait for. Reuse the exact-position edit
+        // queue, while ordinary animation poses never send this notification.
+        Position edit = new(position.X, position.InternalY, position.Z);
+        DiscardPendingGeometryEdit(edit);
+        _receiverDemand?.RequestRefresh();
+        _notifications.Position(edit);
+    }
+
     private void OnChunkDirty(Vec3i coordinate, IWorldChunk chunk, EnumChunkDirtyReason reason)
     {
         // Lighting-only updates still change candidate metadata, including an

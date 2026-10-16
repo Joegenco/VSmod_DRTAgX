@@ -138,13 +138,14 @@ public partial class DrtagxModSystem
         // Retire any native Use without Stop before rewriting source buffers
         // or capturing the GL state for this frame's shadow/deferred passes.
         _terrainPlacedBindings?.Restore();
-        // .36 prepares the receiver targets before this .38 hook. Allocation
-        // does not depend on cache readiness, so first-frame depth can bootstrap
-        // while unsupported/failed deferred routes retain native lighting.
+        // .36 validates the deferred receiver route before this .38 hook.
+        // Empty source sets can omit auxiliary writes, but must keep ordinary
+        // depth discovery/baking alive so a newly placed first light can load.
+        // Unsupported/failed deferred routes retain native lighting.
         // A permanent page-worker failure also pauses needless depth baking
         // until Reload clears it; cache readiness is not a bootstrap condition.
         bool placedLights = FrameQuality.Current.PlacedLights(Config.StaticLightShadows) &&
-                            DeferredReceiverResources.Current is { Ready: true } &&
+                            DeferredReceiverResources.Current is { SchedulingReady: true } &&
                             _placedSurfaceCache is not { Failed: true };
         if (_terrainPlacedBindings != null)
         {

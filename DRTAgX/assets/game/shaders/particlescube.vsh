@@ -3,7 +3,9 @@
 
 layout (location = 0) in vec3 vertexPosition;		// Per vertex
 layout (location = 1) in vec4 normalv;				// Per vertex
-layout (location = 2) in vec2 uv;						// Per vertex
+// Location 2 preserves the native mesh binding; the distinct name allows the
+// native fragment's `uv` input to have a matching vertex output on strict drivers.
+layout (location = 2) in vec2 uvIn;					// Per vertex
 layout (location = 3) in int renderFlags; 			// Per instance
 
 layout (location = 4) in vec3 particlePosition; 	// Per instance (=per particle)
@@ -24,6 +26,7 @@ uniform mat4 projectionMatrix;
 uniform mat4 modelViewMatrix;
 
 out vec4 color;
+out vec2 uv;
 out vec4 rgbaFog;
 out vec3 normal;
 out float fogAmount;
@@ -66,6 +69,7 @@ float atan2(in float y, in float x)
 
 void main()
 {
+	uv = uvIn;
 #if defined(VEC3SCALE)
 	mat4 rotMat = rotation3d(vec3(0,1,0), atan2(particleDir.z, particleDir.x) + particleDir.w);
 	worldPos = rotMat * (vec4(vertexPosition,1.0) * vec4(scale,1.0)) + vec4(particlePosition, 1.0);

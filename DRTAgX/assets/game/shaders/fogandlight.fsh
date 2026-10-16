@@ -1,36 +1,26 @@
 // SheyderMod: vendored engine fogandlight.fsh
-uniform float flatFogDensity;
-uniform float flatFogStart;
-uniform float viewDistance;
-uniform float viewDistanceLod0;
+#include drtagx_fog_uniforms.fsh
 
-uniform float zNear;
-uniform float zFar;
-uniform vec3 lightPosition;
-uniform float shadowIntensity;
-
+// Fullscreen deferred lighting reconstructs receivers from the G-buffer. Keep
+// native geometry varyings on forward passes only: even unused inputs require
+// matching vertex outputs on strict linkers.
+#ifndef DRT_DEFERRED_LIGHTING
 in float sm_voxSunLight;
+#endif
 #include drtagx_surface_lighting.fsh
 
+#ifndef DRT_DEFERRED_LIGHTING
 #if SHADOWQUALITY > 0
 in float blockBrightness;
 in vec4 shadowCoordsFar;
-uniform sampler2DShadow shadowMapFar;
-uniform float shadowMapWidthInv;
-uniform float shadowMapHeightInv;
 #endif
-
 #if SHADOWQUALITY > 1
 in vec4 shadowCoordsNear;
-uniform sampler2DShadow shadowMapNear;
+#endif
 #endif
 
 const float Epsilon = 0.02;
 const float SmoothK = 0.02;
-
-uniform float windWaveCounter;
-uniform float glitchStrength;
-uniform float psychedelicStrength;
 
 #include noise3d.ash
 #include vertexflagbits.ash
@@ -271,7 +261,6 @@ void drtPrepareSunGrid(vec3 worldPos, vec3 normalWorld) {
         drtForwardSunGridOffset = drtSunGridOffset(worldPos - drtAtmosphereCamera.xyz,
             normalWorld, drtSunGridFrame.xyz);
 }
-#endif
 float getBrightnessFromShadowMap() {
     #if SHADOWQUALITY > 0
     vec3 farCoord = shadowCoordsFar.xyz;
@@ -280,7 +269,6 @@ float getBrightnessFromShadowMap() {
     vec3 nearCoord = shadowCoordsNear.xyz;
     vec2 nearGradient;
     #endif
-#ifndef DRT_DEFERRED_LIGHTING
     // Use the prepared geometric plane rather than derivatives after cutout
     // discards/material branches. Both cascades follow the actual wind bend.
     if (dot(drtForwardSunPlaneNormal, drtForwardSunPlaneNormal) > 0.0001) {
@@ -292,20 +280,16 @@ float getBrightnessFromShadowMap() {
             drtSunFoliagePlaneGradient(toShadowMapSpaceMatrixNear, shadowMapNear, drtForwardSunPlaneNormal) :
             drtSunPlaneGradient(toShadowMapSpaceMatrixNear, drtForwardSunPlaneNormal);
 #endif
-    } else
-#endif
-    {
+    } else {
         // Unprepared/normal-free callers retain the native interpolated plane.
         farGradient = drtSunReceiverGradient(shadowCoordsFar.xyz);
 #if SHADOWQUALITY > 1
         nearGradient = drtSunReceiverGradient(shadowCoordsNear.xyz);
 #endif
     }
-#ifndef DRT_DEFERRED_LIGHTING
     farCoord += (toShadowMapSpaceMatrixFar * vec4(drtForwardSunGridOffset, 0.0)).xyz;
 #if SHADOWQUALITY > 1
     nearCoord += (toShadowMapSpaceMatrixNear * vec4(drtForwardSunGridOffset, 0.0)).xyz;
-#endif
 #endif
     float totalFar = 0.0;
     if (shadowCoordsFar.w > 0) {
@@ -334,6 +318,7 @@ float getBrightnessFromShadowMap() {
     
     return 1.0;
 }
+#endif // Forward geometry owns interpolated shadow coordinates.
 
 uniform float ox_Strength  = 0.0;
 uniform float ox_BloomFeed = 0.0;
@@ -345,9 +330,19 @@ float ox_blockLightGate = 1.0;
 float ox_sunFacing      = 1.0;
 float ox_glare          = 0.0;
 
-void ox_prepare(vec3 nrm, float blockBright) {
-    if (ox_Strength <= 0.0) return;
+#ifndef DRT_OVEREXPOSURE_WORLD_DRAW
+#define DRT_OVEREXPOSURE_WORLD_DRAW true
+#endif
 
+void ox_prepare(vec3 nrm, float blockBright) {
+    if (ox_Strength <= 0.0 || !DRT_OVEREXPOSURE_WORLD_DRAW) return;
+
+    // Skinning/model transforms can scale normals. Overexposure's facing gate
+    // must match diffuse sunlight, which already normalizes the same normal.
+#ifdef DRT_OVEREXPOSURE_TRANSFORMED_NORMAL
+    float normalLength2 = dot(nrm, nrm);
+    if (normalLength2 > 1e-8) nrm *= inversesqrt(normalLength2);
+#endif
     float dp = dot(nrm, lightPosition);
     ox_sunFacing = 0.25 + 0.75 * clamp(dp * 20.0, 0.0, 1.0) * (0.5 + 0.5 * dp);
     ox_blockLightGate = 1.0; // Boost belongs to sunlight alone.
@@ -355,7 +350,7 @@ void ox_prepare(vec3 nrm, float blockBright) {
 
 void ox_apply(inout vec3 color, vec3 worldPos) {
     ox_glare = 0.0;
-    if (ox_Strength <= 0.0) return;
+    if (ox_Strength <= 0.0 || !DRT_OVEREXPOSURE_WORLD_DRAW) return;
 
     float sun = sm_sunShadowBright * clamp(dot(drtSunEffectColor(), DRT_LUMINANCE), 0.0, 1.0);
     float dist = clamp(1.0 - length(worldPos) * OX_DIST_INV, 0.0, 1.0);
@@ -385,11 +380,13 @@ float getBrightnessFromNormal(vec3 normal, float normalShadeIntensity, float min
     return clamp(1.0 - (1.0 - normalBrightness) * 1.0, 0.0, 1.0);
 }
 
+#ifndef DRT_DEFERRED_LIGHTING
 vec4 applyFogAndShadow(vec4 rgbaPixel, float fogWeight) {
     float b = mix(1.0, getBrightnessFromShadowMap(), sqrt(clamp(drtSurfaceSunAccess, 0.0, 1.0)));
     rgbaPixel.rgb = drtShadeSurface(rgbaPixel.rgb, b, vec3(1.0));
     return applyFog(rgbaPixel, fogWeight);
 }
+#endif
 
 vec4 applyFogAndShadowFromBrightness(vec4 rgbaPixel, float fogAmount, float b, vec3 worldPos) {
     b = mix(1.0, b, sqrt(clamp(drtSurfaceSunAccess, 0.0, 1.0)));
@@ -405,15 +402,15 @@ vec4 applyFogAndShadowFromBrightness(vec4 rgbaPixel, float fogAmount, float b, v
 #endif
 }
 
-vec4 applyFogAndShadowWithNormal(vec4 rgbaPixel, float fogAmount, vec3 normal, float normalShadeIntensity, float minNormalShade, vec3 worldPos) {
 #ifndef DRT_DEFERRED_LIGHTING
+vec4 applyFogAndShadowWithNormal(vec4 rgbaPixel, float fogAmount, vec3 normal, float normalShadeIntensity, float minNormalShade, vec3 worldPos) {
     drtPrepareSunGrid(worldPos, normal);
-#endif
     ox_prepare(normal, 0.0);
     float b = drtCombineSunDarkening(getBrightnessFromShadowMap(),
         getBrightnessFromNormal(normal, normalShadeIntensity, minNormalShade));
     return applyFogAndShadowFromBrightness(rgbaPixel, fogAmount, b, worldPos);
 }
+#endif
 
 float getFogLevel(float fogMin, float fogDensity, float worldPosY) {
     // Compatibility ABI: reconstruct a physical view-space ray; raw device Z

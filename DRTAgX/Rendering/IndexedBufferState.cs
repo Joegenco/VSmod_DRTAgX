@@ -27,6 +27,10 @@ internal readonly struct IndexedBufferState
         bool uniform = target == BufferRangeTarget.UniformBuffer;
         GL.GetInteger(uniform ? GetIndexedPName.UniformBufferBinding : GetIndexedPName.ShaderStorageBufferBinding,
             index, out int name);
+        // An unbound slot has no buffer range to preserve. Most native model
+        // draws leave our auxiliary slots empty; avoid two driver queries on
+        // each borrow while still preserving exact ranges owned by other mods.
+        if (name == 0) return new IndexedBufferState(target, index, 0, 0, 0);
         GL.GetInteger64(uniform ? GetIndexedPName.UniformBufferStart : GetIndexedPName.ShaderStorageBufferStart,
             index, out long offset);
         GL.GetInteger64(uniform ? GetIndexedPName.UniformBufferSize : GetIndexedPName.ShaderStorageBufferSize,

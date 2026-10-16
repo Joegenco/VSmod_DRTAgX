@@ -6,7 +6,7 @@ using Vintagestory.Client.NoObf;
 [assembly: ModInfo(
     name: "DRT AgX",
     modID: "drtagx",
-    Version = "2.1.1",
+    Version = "2.1.3",
     Description =
         "Client-side AgX tone mapping, HDR, atmospheric lighting and cached placed-light shadows for Vintage Story.",
     Authors = new[] { "Joegen" },
@@ -36,7 +36,10 @@ namespace DRTAgX
         private AtmosphereRenderer? _atmosphere;
         private RainSplashLightingCompatibility? _rainSplashLighting;
         private ParticleLightCompatibility? _particleLighting;
-        private AnimatedBlockLightBindings? _animatedBlockLights;
+        private AnimatedBlockLightingScope? _animatedBlockLighting;
+        private SheyderAnimatedOverexposure? _animatedOverexposure;
+        private LeafMaterialBindings? _leafMaterials;
+        private StableContainerRendering? _stableContainers;
         private SheyderSunGeometryCompatibility? _sunGeometry;
         private RainCurtainsCompatibility? _rainCurtains;
         private GhostChunksCompatibility? _ghostChunks;
@@ -93,7 +96,12 @@ namespace DRTAgX
             // Native splash visibility glow must not become HDR self-illumination.
             _rainSplashLighting = new RainSplashLightingCompatibility(api);
             _particleLighting = new ParticleLightCompatibility(api);
-            _animatedBlockLights = new AnimatedBlockLightBindings(api);
+            _animatedBlockLighting = new AnimatedBlockLightingScope(api);
+            _animatedOverexposure = new SheyderAnimatedOverexposure(api);
+            _leafMaterials = new LeafMaterialBindings(api);
+            // Rest-mesh lifetime changes affect cached depth; lid poses do not.
+            _stableContainers = new StableContainerRendering(api,
+                position => _staticLightSources?.NotifyCasterGeometryChanged(position));
             _sunGeometry = new SheyderSunGeometryCompatibility(api);
             // Optional weather shaders borrow the initialized atmosphere's
             // existing UBO/LUT bindings; RainCurtains retains its own draw.
@@ -197,6 +205,8 @@ namespace DRTAgX
             _hdrPrimaryBuffer.Ensure(_clientApi);
             // GUI edits become one immutable policy before any world/shadow draws in this frame.
             FrameQuality.Publish(Config);
+            _leafMaterials?.BeforeFrame();
+            _stableContainers?.BeforeFrame();
             _placedQualityShaders?.BeforeFrame();
             if (_placedQualityShaders?.CasterChangedThisFrame == true)
             {
@@ -237,10 +247,16 @@ namespace DRTAgX
             _celestialSun = null;
             _rainSplashLighting?.Dispose();
             _rainSplashLighting = null;
-            _animatedBlockLights?.Dispose();
             _particleLighting?.Dispose();
             _particleLighting = null;
-            _animatedBlockLights = null;
+            _animatedBlockLighting?.Dispose();
+            _animatedBlockLighting = null;
+            _animatedOverexposure?.Dispose();
+            _animatedOverexposure = null;
+            _leafMaterials?.Dispose();
+            _leafMaterials = null;
+            _stableContainers?.Dispose();
+            _stableContainers = null;
             _sunGeometry?.Dispose();
             _sunGeometry = null;
             _rainCurtains?.Dispose();

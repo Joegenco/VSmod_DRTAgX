@@ -28,15 +28,49 @@ namespace DRTAgX
         internal static string ReleaseDeferredSource(string source) => source.Replace(
             "#include drtagx_deferred_debug.fsh", string.Empty, StringComparison.Ordinal);
 
+        internal static void InstallLoadedModelReceiver(ICoreClientAPI api, string passName, IShader shader)
+        {
+            const string marker = "// DRT_MODEL_RECEIVER_INSERT";
+            if (!passName.Equals("standard", StringComparison.OrdinalIgnoreCase) &&
+                !passName.Equals("entityanimated", StringComparison.OrdinalIgnoreCase) &&
+                !passName.Equals("entityanimated_oit", StringComparison.OrdinalIgnoreCase)) return;
+            var source = shader.Code;
+            if (string.IsNullOrEmpty(source) || !source.Contains(marker, StringComparison.Ordinal) ||
+                !source.Contains("#define DRT_EXPLICIT_SURFACE_LIGHTING", StringComparison.Ordinal) ||
+                source.Contains("#define DRT_PLACED_RECEIVER_FALLBACK", StringComparison.Ordinal)) return;
+
+            // Native shader reloads can replace asset data before compiling and
+            // notify ReloadShader subscribers afterwards. Repair the actual
+            // loaded stage at this boundary, rather than only its cached asset.
+            // These two owned dependencies are leaves; all other lighting math
+            // was already expanded by the native loader. No native include
+            // resolver or global deduplication policy is replaced here.
+            var helper = api.Assets.Get(new AssetLocation("drtagx",
+                "shaders/lighting/drtagx_placed_receiver_fallback.ash")).ToText();
+            var cube = api.Assets.Get(new AssetLocation("drtagx",
+                "shaders/deferred/drtagx_deferred_cube.fsh")).ToText();
+            var shadows = api.Assets.Get(new AssetLocation("drtagx",
+                "shaders/deferred/drtagx_deferred_staticshadows.fsh")).ToText();
+            helper = helper.Replace("#include drtagx_deferred_cube.fsh", cube, StringComparison.Ordinal)
+                .Replace("#include drtagx_deferred_staticshadows.fsh", shadows, StringComparison.Ordinal);
+            shader.Code = source.Replace(marker, helper + "\n" + marker, StringComparison.Ordinal);
+        }
+
         private static void InstallStandardReceiver(ICoreClientAPI api)
         {
-            var standard = api.Assets.TryGet(new AssetLocation("game", "shaders/standard.fsh"));
+            InstallModelReceiver(api, "standard.fsh");
+            InstallModelReceiver(api, "entityanimated.fsh");
+        }
+
+        private static void InstallModelReceiver(ICoreClientAPI api, string filename)
+        {
+            var standard = api.Assets.TryGet(new AssetLocation("game", "shaders/" + filename));
             if (standard == null) return;
             const string include = "#include drtagx_placed_receiver_fallback.ash";
             var source = standard.ToText();
             if (source.Contains(include, StringComparison.Ordinal)) return;
-            // FpHands compiles Standard before custom includes are indexed.
-            // Add the helper only after asset registration, on this owner alone:
+            // FpHands compiles native model shaders before custom includes are indexed.
+            // Add the helper only after asset registration, on each owner alone:
             // the native resolver deduplicates includes before GLSL conditionals.
             const string anchor = "#include fogandlight.fsh";
             if (!source.Contains(anchor, StringComparison.Ordinal)) return;
