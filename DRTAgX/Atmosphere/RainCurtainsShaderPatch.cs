@@ -23,7 +23,7 @@ internal static class RainCurtainsShaderPatch
         const string version = "#version 330 core";
         const string varying = "flat out vec3 cloudTint;";
         const string ray = "shownRel = pos - camRelPos;";
-        const string cloudFog = "tint = mix(rainColour, rgbaFogIn.rgb, fogAmount * (1.0 - cloudward));";
+        const string cloudFog = "tint = mix(tint, rgbaFogIn.rgb, fogAmount * TERRAIN_FOG * (1.0 - merge));";
         const string simpleFog = "tint = rgbaFogIn.rgb * mix(darken, 1.0, cloudFogAmount);";
         const string rainbow = "return clamp(tint * (1.0 - dark * k) + light * k, 0.0, 1.0);";
         const string dither =
@@ -45,7 +45,7 @@ internal static class RainCurtainsShaderPatch
                 StringComparison.Ordinal)
             // cloudTint already contains DRTAgX cloudmap's drtCloudLight plus
             // additive lightning. Adapt only the separately supplied native fog.
-            .Replace(cloudFog, "tint = mix(rainColour, drtRainFog, fogAmount * (1.0 - cloudward));",
+            .Replace(cloudFog, "tint = mix(tint, drtRainFog, fogAmount * TERRAIN_FOG * (1.0 - merge));",
                 StringComparison.Ordinal)
             .Replace(simpleFog, "tint = drtRainFog * mix(darken, 1.0, cloudFogAmount);", StringComparison.Ordinal)
             .Replace(rainbow,
